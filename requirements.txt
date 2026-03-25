@@ -76,7 +76,7 @@ msgpack>=1.0.7
 
 # Web Interface (REQUIRED for future web API)
 jinja2>=3.1.2
-python-multipart>=0.0.6
+python-multipart>=0.0.22  # CVE-2026-24486 fix
 
 # Security (REQUIRED)
 # Reserved for future web API authentication
