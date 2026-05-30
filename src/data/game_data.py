@@ -31,11 +31,19 @@ PASSIVE_TREE_DIR = GAME_DATA_DIR / "passive_tree"
 PASSIVE_TREE_JSON = PASSIVE_TREE_DIR / "tree.json"
 PASSIVE_TREE_META = PASSIVE_TREE_DIR / "metadata.json"
 
-# Datasets pending 0.5 re-extract (paths reserved; folders may not yet exist).
-# Sub-extractors should write into these locations as they come online.
-ASCENDANCIES_DIR = GAME_DATA_DIR / "ascendancies"
 SUPPORT_GEMS_DIR = GAME_DATA_DIR / "support_gems"
+SUPPORT_GEMS_JSON = SUPPORT_GEMS_DIR / "support_gems.json"
+SUPPORT_GEMS_META = SUPPORT_GEMS_DIR / "metadata.json"
+
+ASCENDANCIES_DIR = GAME_DATA_DIR / "ascendancies"
+ASCENDANCIES_JSON = ASCENDANCIES_DIR / "ascendancies.json"
+ASCENDANCIES_META = ASCENDANCIES_DIR / "metadata.json"
+
 STATS_DIR = GAME_DATA_DIR / "stats"
+STATS_JSON = STATS_DIR / "stats.json"
+STATS_META = STATS_DIR / "metadata.json"
+
+# Datasets pending 0.5 re-extract (paths reserved; folders may not yet exist).
 SKILL_GEMS_DIR = GAME_DATA_DIR / "skill_gems"
 
 
@@ -61,6 +69,33 @@ def load_passive_tree() -> Optional[Dict[str, Any]]:
     if not PASSIVE_TREE_JSON.exists():
         return None
     return json.loads(PASSIVE_TREE_JSON.read_text(encoding="utf-8"))
+
+
+def load_support_gems() -> Optional[Dict[str, Any]]:
+    """Load and return the canonical support gems dataset, or None if missing."""
+    if not SUPPORT_GEMS_JSON.exists():
+        return None
+    return json.loads(SUPPORT_GEMS_JSON.read_text(encoding="utf-8"))
+
+
+def load_ascendancies() -> Optional[Dict[str, Any]]:
+    """Load and return the canonical ascendancies dataset, or None if missing."""
+    if not ASCENDANCIES_JSON.exists():
+        return None
+    return json.loads(ASCENDANCIES_JSON.read_text(encoding="utf-8"))
+
+
+def load_stats() -> Optional[Dict[int, str]]:
+    """Load and return the canonical stats table as a {row_index: stat_id} dict.
+
+    Returns the dict form (not the raw JSON envelope) because that's the shape
+    every caller wants — for resolving stat_key references from mods, passives,
+    and gems. Returns None if stats.json is missing.
+    """
+    if not STATS_JSON.exists():
+        return None
+    payload = json.loads(STATS_JSON.read_text(encoding="utf-8"))
+    return {entry["row_index"]: entry["stat_id"] for entry in payload.get("stats", [])}
 
 
 def load_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:

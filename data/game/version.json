@@ -3,9 +3,9 @@
   "patch_version": "0.5",
   "patch_name": "Return of the Ancients",
   "patch_released": "2026-05-29",
-  "data_revision": 2,
-  "released_as": "data-v0.5.0-r2",
-  "extracted_at": "2026-05-30T14:18:00Z",
+  "data_revision": 3,
+  "released_as": "data-v0.5.0-r3",
+  "extracted_at": "2026-05-30T16:30:00Z",
   "extracted_by": "HivemindMinion (Claude Code) from HivemindOverlord's licensed PoE2 install",
   "datasets": {
     "mods": {
@@ -28,15 +28,17 @@
       "files": ["ascendancies.json", "metadata.json"],
       "record_count": 37,
       "note": "ids are reliable; display_name is best-effort heuristic (see metadata.json caveats)"
+    },
+    "stats": {
+      "path": "data/game/stats/",
+      "files": ["stats.json", "metadata.json"],
+      "record_count": 26943,
+      "note": "{row_index: stat_id} mapping; used to resolve stat_key refs in mods/passives/gems"
     }
   },
   "datasets_pending_0_5_reextract": {
-    "stats": {
-      "blocker": "no current extractor; needs writing against current stats.datc64 layout (~110KB, 26943 stat definitions loaded by support_gems extractor as side-effect)",
-      "interim_via_side_effect": "support_gems extractor loads 26943 stat IDs from stats.datc64 as a side-effect; could repurpose into a standalone stats extractor"
-    },
     "skill_gems": {
-      "blocker": "extractor sources from PoB2 which hasn't shipped 0.5 tree.json yet (see CLAUDE.md Data Status)",
+      "blocker": "extractor sources from PoB2 which hasn't shipped 0.5 tree.json upstream yet (verified 2026-05-30); will sync once PoB2 community lands the 0.5 skill data",
       "current_pre_0_5_location": "data/pob_active_skills.json (tracked, Dec 2025)"
     }
   },
