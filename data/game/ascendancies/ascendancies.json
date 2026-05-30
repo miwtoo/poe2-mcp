@@ -2,11 +2,12 @@
   "metadata": {
     "source": "data\\extracted\\data\\balance\\ascendancy.datc64",
     "source_bytes": 15255,
-    "extracted_at": "2026-05-30T19:44:54.787400+00:00",
+    "extracted_at": "2026-05-30T19:46:22.686130+00:00",
     "row_count": 37,
     "row_size": 165,
+    "record_count": 37,
     "active_count": 23,
-    "total_count": 37,
+    "unused_count": 14,
     "extractor": "scripts/extract_ascendancies_v2.py",
     "patch": "PoE2 0.5 (Return of the Ancients)"
   },

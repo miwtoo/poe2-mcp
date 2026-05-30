@@ -14,8 +14,8 @@
   "record_count": 37,
   "active_count": 23,
   "unused_count": 14,
-  "sha256": "e9d4a56aafca744495ca2ffae607e793de83ed710495016dfd0167a8a5746f0c",
-  "bytes": 5238,
+  "sha256": "bbe85d5c32deeec2c037cf2afdfebf56c030a417ce289ccca0d11759e92ca09d",
+  "bytes": 5264,
   "schema_notes": [
     "Each entry has row_index, id, display_name, is_unused.",
     "display_name is now the canonical name from ascendancy.datc64 offset 44 (verified clean across all 37 rows; previous heuristic-of-longest-string approach was wrong and produced art-asset paths and flavor text).",
