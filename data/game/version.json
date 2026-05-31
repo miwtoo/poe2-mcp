@@ -3,10 +3,10 @@
   "patch_version": "0.5",
   "patch_name": "Return of the Ancients",
   "patch_released": "2026-05-29",
-  "data_revision": 6,
-  "released_as": "data-v0.5.0-r6",
-  "extracted_at": "2026-05-31T01:30:00Z",
-  "extracted_by": "HivemindMinion (Claude Code) from HivemindOverlord's licensed PoE2 install",
+  "data_revision": 7,
+  "released_as": "data-v0.5.0-r7",
+  "extracted_at": "2026-05-31T15:00:00Z",
+  "extracted_by": "HivemindMinion (Claude Code) from HivemindOverlord's licensed PoE2 install + PoB2 community repo",
   "datasets": {
     "mods": {
       "path": "data/game/mods/",
@@ -37,13 +37,16 @@
       "files": ["stats.json", "metadata.json"],
       "record_count": 26943,
       "note": "{row_index: stat_id} mapping; used to resolve stat_key refs in mods/passives/gems"
-    }
-  },
-  "datasets_pending_0_5_reextract": {
+    },
     "skill_gems": {
-      "blocker": "extractor sources from PoB2 which hasn't shipped 0.5 tree.json upstream yet (verified 2026-05-30); will sync once PoB2 community lands the 0.5 skill data",
-      "current_pre_0_5_location": "data/pob_active_skills.json (tracked, Dec 2025)"
+      "path": "data/game/skill_gems/",
+      "files": ["skill_gems.json", "metadata.json"],
+      "record_count": 872,
+      "matched_effect_count": 872,
+      "source": "PoB2 origin/dev @ 9c2bf0316 (2026-05-30) — Gems.lua + Skills/*.lua joined view",
+      "note": "Joined gem-metadata + granted-effect records. Schema v1: levels/stat_sets surface a useful subset; full statMap / baseFlags / constantStats / stats lists are NOT yet extracted (require structural Lua parser — deferred to v2). Per-gem record count (872) is intentionally smaller than support_gems.record_count (680) because the two datasets cover different surface areas: this is the PoB2 gem-and-effect joined view; support_gems is the extracted .datc64 support-modifier table."
     }
   },
-  "data_policy": "All data here is extracted exclusively from the maintainer's licensed PoE2 install via the in-repo extraction pipeline. No third-party wiki / scraped data is bundled. See data/game/README.md for the full policy."
+  "datasets_pending_0_5_reextract": {},
+  "data_policy": "All structured data here is extracted exclusively from the maintainer's licensed PoE2 install (.datc64) and from the open-source PathOfBuilding-PoE2 community repo (for skill_gems). No third-party wiki / scraped data is bundled. See data/game/README.md for the full policy."
 }
