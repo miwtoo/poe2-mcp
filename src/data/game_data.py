@@ -98,6 +98,138 @@ def load_stats() -> Optional[Dict[int, str]]:
     return {entry["row_index"]: entry["stat_id"] for entry in payload.get("stats", [])}
 
 
+# ============================================================================
+# Convenience lookup helpers — saved scrolls so callers (especially AIs) don't
+# have to know the internal JSON shape to do common filters.
+#
+# These are pure functions over the loaded data — no caching, no IO beyond the
+# one load_*() call. Callers that need many lookups should load once and use
+# the structures directly; these helpers are for one-shot use from MCP handlers
+# and ad-hoc scripts.
+# ============================================================================
+
+
+def find_ascendancies_by_base_class(
+    base_class: str,
+    include_unused: bool = False,
+) -> list:
+    """Return all ascendancy entries whose base_class matches.
+
+    Example:
+        >>> find_ascendancies_by_base_class("Witch")
+        [{"id": "Witch1", "display_name": "Infernalist", ...},
+         {"id": "Witch2", "display_name": "Blood Mage", ...},
+         {"id": "Witch3", "display_name": "Lich", ...},
+         {"id": "Witch3b", "display_name": "Abyssal Lich", ...}]
+
+    Args:
+        base_class: Case-insensitive class name ("Witch", "monk", etc.).
+        include_unused: If True, include [DNT-UNUSED] placeholder rows.
+                        Default False — only PoE2-active ascendancies.
+
+    Returns empty list if dataset isn't loaded yet or no matches.
+    Relies on PR #78's base_class field; older revisions without that
+    field will return empty.
+    """
+    payload = load_ascendancies()
+    if not payload:
+        return []
+    target = base_class.lower()
+    out = []
+    for a in payload.get("ascendancies", []):
+        if (a.get("base_class") or "").lower() != target:
+            continue
+        if not include_unused and a.get("is_unused"):
+            continue
+        out.append(a)
+    return out
+
+
+def find_mods_by_stat_id(
+    stat_id: str,
+    generation_type: Optional[str] = None,
+    limit: int = 50,
+) -> list:
+    """Return mods whose stats include the given stat_id.
+
+    Relies on PR #75's inline stat_id enrichment. Falls back to empty if the
+    mods dataset doesn't have that field yet (older data revisions).
+
+    Args:
+        stat_id: Canonical stat identifier (e.g. 'additional_strength',
+                 'base_life_regeneration_rate_per_second').
+        generation_type: Optional filter — 'PREFIX', 'SUFFIX', 'IMPLICIT',
+                         'CORRUPTED'. None = all types.
+        limit: Cap on returned mods (sorted by level_requirement asc).
+    """
+    payload = load_mods()
+    if not payload:
+        return []
+    target = stat_id.lower()
+    out = []
+    for mod in payload.get("mods", []):
+        if generation_type and mod.get("generation_type_name") != generation_type:
+            continue
+        for s in mod.get("stats", []):
+            if s.get("is_empty"):
+                continue
+            sid = s.get("stat_id")
+            if sid and sid.lower() == target:
+                out.append(mod)
+                break
+    out.sort(key=lambda m: m.get("level_requirement", 0))
+    return out[:limit]
+
+
+def find_mods_by_display_name(display_name_fragment: str, limit: int = 50) -> list:
+    """Substring search across mod display_name (case-insensitive).
+
+    Useful for "find the mod that grants X" queries when the user knows the
+    suffix/prefix name (e.g. 'of the Newt') but not the stat_id.
+    """
+    payload = load_mods()
+    if not payload:
+        return []
+    needle = display_name_fragment.lower()
+    out = [m for m in payload.get("mods", []) if needle in (m.get("display_name") or "").lower()]
+    out.sort(key=lambda m: m.get("level_requirement", 0))
+    return out[:limit]
+
+
+def get_keystones() -> list:
+    """Return all keystone nodes from the passive tree.
+
+    Each entry includes id, name, stats, and other passive-tree-node fields.
+    Empty list if passive_tree dataset isn't loaded.
+    """
+    payload = load_passive_tree()
+    if not payload:
+        return []
+    return [n for n in payload.get("nodes", {}).values() if n.get("is_keystone")]
+
+
+def get_notables() -> list:
+    """Return all notable nodes from the passive tree (excluding keystones)."""
+    payload = load_passive_tree()
+    if not payload:
+        return []
+    return [n for n in payload.get("nodes", {}).values() if n.get("is_notable") and not n.get("is_keystone")]
+
+
+def find_keystone_by_name(name: str) -> Optional[Dict[str, Any]]:
+    """Look up a keystone by display name (case-insensitive exact match).
+
+    Example:
+        >>> find_keystone_by_name("Resolute Technique")
+        {"id": "passive_keystone_resolute_technique", "name": "Resolute Technique", ...}
+    """
+    target = name.lower().strip()
+    for k in get_keystones():
+        if (k.get("name") or "").lower().strip() == target:
+            return k
+    return None
+
+
 def load_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
     """Load `metadata.json` from a dataset directory."""
     meta = dataset_dir / "metadata.json"
