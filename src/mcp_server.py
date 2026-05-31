@@ -345,6 +345,8 @@ class PoE2BuildOptimizerMCP:
                 return await self._handle_health_check(arguments)
             elif name == "clear_cache":
                 return await self._handle_clear_cache(arguments)
+            elif name == "check_tree_freshness":
+                return await self._handle_check_tree_freshness(arguments)
             elif name == "setup_trade_auth":
                 return await self._handle_setup_trade_auth(arguments)
             # KNOWLEDGE TOOLS (4 tools)
@@ -680,6 +682,20 @@ class PoE2BuildOptimizerMCP:
                     inputSchema={
                         "type": "object",
                         "properties": {}
+                    }
+                ),
+                types.Tool(
+                    name="check_tree_freshness",
+                    description="Self-diagnostic: compare local game-data version (data/game/version.json) against poe.ninja's current PassiveTree tag from index-state. Reports whether your local data/game/ datasets are up to date with the live patch, or behind. Strict change-detection only — does not download or modify any data.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "verbose": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": "Include full index-state snapshot list and per-dataset breakdown"
+                            }
+                        }
                     }
                 ),
                 types.Tool(
@@ -2544,6 +2560,139 @@ Consider:
             return [types.TextContent(
                 type="text",
                 text=f"Health check failed with error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+            )]
+
+    async def _handle_check_tree_freshness(self, args: dict) -> List[types.TextContent]:
+        """Self-diagnostic: compare local data/game/version.json against poe.ninja's current PassiveTree tag.
+
+        Strict change-detection only — fetches /poe2/api/data/index-state for the
+        PassiveTree version tag, compares to our local patch_version, reports
+        current/behind/ahead/unable. Does NOT download or modify any data; pure
+        diagnostic so users know whether they need to `git pull` for fresher
+        data/game/ datasets.
+
+        Per the project data policy in CLAUDE.md, poe.ninja is allowed for
+        character/change-detection ONLY, not game-data sourcing. This tool is
+        the canonical change-detection use case.
+        """
+        try:
+            verbose = args.get("verbose", False)
+            response = "# Game Data Freshness Check\n\n"
+
+            # 1. Read local data/game/version.json (canonical) — falls back to
+            #    legacy data/version.json (from data_distributor) if newer file
+            #    isn't present
+            game_version_file = DATA_DIR / "game" / "version.json"
+            legacy_version_file = DATA_DIR / "version.json"
+            local_version = None
+            local_source = None
+            if game_version_file.exists():
+                try:
+                    local_version = json.loads(game_version_file.read_text(encoding="utf-8"))
+                    local_source = str(game_version_file.relative_to(DATA_DIR.parent))
+                except Exception as e:
+                    response += f":warning: Failed to parse {game_version_file}: {e}\n\n"
+            elif legacy_version_file.exists():
+                try:
+                    local_version = json.loads(legacy_version_file.read_text(encoding="utf-8"))
+                    local_source = str(legacy_version_file.relative_to(DATA_DIR.parent))
+                except Exception as e:
+                    response += f":warning: Failed to parse {legacy_version_file}: {e}\n\n"
+
+            local_patch = (local_version or {}).get("patch_version", "(unknown)")
+            local_rev = (local_version or {}).get("released_as") or (local_version or {}).get("data_revision", "(unknown)")
+
+            response += f"## Local\n\n"
+            response += f"- **Source:** `{local_source or '(no version manifest found)'}`\n"
+            response += f"- **Patch:** `{local_patch}`\n"
+            response += f"- **Revision:** `{local_rev}`\n"
+            if local_version:
+                ds = local_version.get("datasets") or {}
+                if ds:
+                    response += f"- **Datasets:** {', '.join(ds.keys())}\n"
+            response += "\n"
+
+            # 2. Probe poe.ninja index-state for the live PassiveTree tag
+            response += "## Live (poe.ninja index-state)\n\n"
+            live_passive_tree = None
+            live_league_name = None
+            live_league_slug = None
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as c:
+                    r = await c.get(
+                        "https://poe.ninja/poe2/api/data/index-state",
+                        headers={"User-Agent": "poe2-mcp/check_tree_freshness", "Accept": "application/json"},
+                    )
+                    if r.status_code != 200:
+                        response += f":warning: index-state returned HTTP {r.status_code}; can't verify freshness.\n\n"
+                    else:
+                        idx = r.json()
+                        # Find the FIRST non-private-league snapshot with a passiveTree tag
+                        # (private leagues have weird names; main league is what users care about)
+                        for snap in idx.get("snapshotVersions", []):
+                            pt = snap.get("passiveTree")
+                            url = (snap.get("url") or "").lower()
+                            # Skip private-league slugs (pattern: pl#####)
+                            if pt and not url.startswith("pl"):
+                                live_passive_tree = pt
+                                live_league_name = snap.get("name")
+                                live_league_slug = snap.get("url")
+                                break
+                        if not live_passive_tree:
+                            response += ":warning: No PassiveTree tag found in index-state snapshots.\n\n"
+            except Exception as e:
+                response += f":warning: Could not reach poe.ninja index-state: {type(e).__name__}: {e}\n\n"
+                response += "(Are you offline? Is poe.ninja down? Check connectivity.)\n\n"
+
+            if live_passive_tree:
+                response += f"- **Current league:** {live_league_name} (slug: `{live_league_slug}`)\n"
+                response += f"- **PassiveTree tag:** `{live_passive_tree}`\n\n"
+
+            # 3. Verdict
+            response += "## Verdict\n\n"
+            if not local_version:
+                response += ":x: **Cannot verify** — no local version manifest found at `data/game/version.json` or `data/version.json`.\n\n"
+                response += "Fix: pull the latest from main (`git pull`) or run `python -m src.data.data_distributor` to fetch the data bundle from GitHub Releases.\n"
+            elif not live_passive_tree:
+                response += ":grey_question: **Cannot fully verify** — local patch `{local_patch}` is loaded, but the live PassiveTree tag from poe.ninja couldn't be fetched. Local data may or may not be current; try again later.\n".format(local_patch=local_patch)
+            else:
+                # Normalize: live is "PassiveTree-0.5" → "0.5"; local is "0.5" (just the patch)
+                live_normalized = live_passive_tree.replace("PassiveTree-", "")
+                if str(local_patch) == live_normalized:
+                    response += f":white_check_mark: **Current.** Your local data ({local_source}) matches the live patch (`{live_passive_tree}`).\n"
+                else:
+                    # Determine if behind or ahead based on simple float compare
+                    try:
+                        local_f = float(local_patch)
+                        live_f = float(live_normalized)
+                        if local_f < live_f:
+                            response += f":warning: **Behind by patch.** Local is `{local_patch}`, live is `{live_normalized}`.\n\n"
+                            response += "Fix: `git pull` to fetch the latest `data/game/` files HivemindMinion has extracted for the new patch.\n"
+                        else:
+                            response += f":grey_question: **Ahead of live?** Local is `{local_patch}`, live is `{live_normalized}`. This is unusual — possibly local extraction of an unreleased patch.\n"
+                    except ValueError:
+                        response += f":grey_question: **Version mismatch (non-numeric).** Local: `{local_patch}`. Live: `{live_normalized}`. Manual inspection needed.\n"
+
+            # 4. Verbose mode: dump full index-state snapshot summary
+            if verbose and live_passive_tree:
+                try:
+                    response += "\n## Verbose: index-state snapshots\n\n"
+                    snaps = (idx or {}).get("snapshotVersions", [])
+                    response += f"| Name | Slug | PassiveTree |\n|---|---|---|\n"
+                    for snap in snaps[:20]:
+                        response += f"| {snap.get('name', '?')} | `{snap.get('url', '?')}` | `{snap.get('passiveTree', '-')}` |\n"
+                    if len(snaps) > 20:
+                        response += f"\n*(+{len(snaps) - 20} more snapshots)*\n"
+                except Exception:
+                    pass
+
+            return [types.TextContent(type="text", text=response)]
+        except Exception as e:
+            logger.error(f"check_tree_freshness failed: {e}", exc_info=True)
+            return [types.TextContent(
+                type="text",
+                text=f"check_tree_freshness encountered an error: {str(e)}"
             )]
 
     async def _handle_clear_cache(self, args: dict) -> List[types.TextContent]:
