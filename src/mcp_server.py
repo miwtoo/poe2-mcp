@@ -3386,7 +3386,12 @@ Consider:
             )]
 
     async def _handle_inspect_spell_gem(self, args: dict) -> List[types.TextContent]:
-        """Inspect complete details of a spell gem. Accepts spell_name, name, or gem_name (aliases)."""
+        """Inspect complete details of a spell gem. Accepts spell_name, name, or gem_name (aliases).
+
+        Prefers the fresh data/game/skill_gems/skill_gems.json (Patch 0.5, from PoB2 dev).
+        Falls back to legacy data/pob_complete_skills.json (Dec 2025) for fields the v1
+        dataset doesn't yet extract (e.g. baseMultiplier, constantStats, statMap).
+        """
         try:
             spell_name = args.get("spell_name") or args.get("name") or args.get("gem_name")
 
@@ -3396,40 +3401,131 @@ Consider:
                     text="Error: spell_name (or alias: name, gem_name) is required"
                 )]
 
-            # Load from pob_complete_skills.json (has full per-level stats, statSets, constantStats)
-            pob_skills_file = Path(__file__).parent.parent / 'data' / 'pob_complete_skills.json'
+            # --- Tier 1: try the fresh 0.5 dataset ---
+            new_dataset_file = Path(__file__).parent.parent / 'data' / 'game' / 'skill_gems' / 'skill_gems.json'
+            new_dataset_meta = Path(__file__).parent.parent / 'data' / 'game' / 'skill_gems' / 'metadata.json'
 
-            if not pob_skills_file.exists():
-                return [types.TextContent(
-                    type="text",
-                    text="Error: pob_complete_skills.json not found"
-                )]
-
-            with open(pob_skills_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            # Search for spell by name (case-insensitive) or ID
             spell_data = None
             spell_id = None
-            skills = data.get('skills', {})
+            data_source_note = ""
 
-            for skill_id_candidate, skill in skills.items():
-                if not isinstance(skill, dict):
-                    continue
-                # Check if name matches or ID matches
-                skill_name = skill.get('name', '')
-                if (skill_name.lower() == spell_name.lower() or
-                    skill_id_candidate.lower() == spell_name.lower() or
-                    spell_name.lower() in skill_name.lower()):
-                    spell_data = skill
-                    spell_id = skill_id_candidate
-                    break
+            if new_dataset_file.exists():
+                with open(new_dataset_file, 'r', encoding='utf-8') as f:
+                    new_data = json.load(f)
+                needle = spell_name.lower()
+                for gem in new_data.get('skill_gems', []):
+                    name = (gem.get('name') or '').lower()
+                    gid = (gem.get('gem_id') or '').lower()
+                    vid = (gem.get('variant_id') or '').lower()
+                    if needle == name or needle == vid or needle in gid or needle in name:
+                        # Translate the new schema into the legacy-shaped dict the
+                        # rest of this handler already understands. Saves a rewrite.
+                        ge = gem.get('granted_effect') or {}
+                        # Normalize levels: keys are strings in JSON already
+                        normalized_levels = {}
+                        for lvl_key, lvl in (ge.get('levels') or {}).items():
+                            entry = {}
+                            if 'level_requirement' in lvl:
+                                entry['levelRequirement'] = lvl['level_requirement']
+                            if 'crit_chance' in lvl:
+                                entry['critChance'] = lvl['crit_chance']
+                            if 'cooldown' in lvl:
+                                entry['cooldown'] = lvl['cooldown']
+                            if 'cost' in lvl and isinstance(lvl['cost'], dict):
+                                c = lvl['cost']
+                                entry['cost'] = {c.get('type', 'Mana'): c.get('value', 0)}
+                            normalized_levels[lvl_key] = entry
+                        normalized_stat_sets = []
+                        for ss in (ge.get('stat_sets') or []):
+                            normalized_stat_sets.append({
+                                'label': ss.get('label'),
+                                'baseEffectiveness': ss.get('base_effectiveness'),
+                                'incrementalEffectiveness': ss.get('incremental_effectiveness'),
+                            })
+                        spell_data = {
+                            'name': gem.get('name'),
+                            'description': None,  # not in v1 schema
+                            'skillTypes': ge.get('skill_types') or [],
+                            'castTime': ge.get('cast_time'),
+                            'levels': normalized_levels,
+                            'statSets': normalized_stat_sets,
+                            'qualityStats': [],  # not in v1 schema
+                            '_new_dataset_extras': {
+                                'gem_id': gem.get('gem_id'),
+                                'variant_id': gem.get('variant_id'),
+                                'gem_type': gem.get('gem_type'),
+                                'tier': gem.get('tier'),
+                                'natural_max_level': gem.get('natural_max_level'),
+                                'requirements': gem.get('requirements'),
+                                'weapon_requirements': gem.get('weapon_requirements'),
+                                'tags': gem.get('tags') or [],
+                                'tag_string': gem.get('tag_string'),
+                                'additional_stat_sets': gem.get('additional_stat_sets') or [],
+                            },
+                        }
+                        spell_id = gem.get('gem_id') or gem.get('variant_id')
+                        # Build the data-source note from metadata.json if available
+                        commit_ref = "PoB2 dev"
+                        extracted_at = "?"
+                        if new_dataset_meta.exists():
+                            try:
+                                with open(new_dataset_meta, 'r', encoding='utf-8') as mf:
+                                    meta = json.load(mf)
+                                commit_ref = (meta.get('source_commit') or commit_ref)[:12]
+                                extracted_at = meta.get('extracted_at', extracted_at)
+                            except Exception:
+                                pass
+                        data_source_note = (
+                            f"**Data Source**: data/game/skill_gems/skill_gems.json "
+                            f"(PoB2 origin/dev @ {commit_ref}, extracted {extracted_at})\n"
+                        )
+                        break
 
-            if not spell_data:
-                return [types.TextContent(
-                    type="text",
-                    text=f"Spell gem '{spell_name}' not found in PoB database"
-                )]
+            # --- Tier 2: fall back to legacy pob_complete_skills.json ---
+            if spell_data is None:
+                pob_skills_file = Path(__file__).parent.parent / 'data' / 'pob_complete_skills.json'
+
+                if not pob_skills_file.exists():
+                    return [types.TextContent(
+                        type="text",
+                        text=(
+                            f"Spell gem '{spell_name}' not found in data/game/skill_gems/ "
+                            "and no legacy pob_complete_skills.json fallback available."
+                        )
+                    )]
+
+                with open(pob_skills_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                # Search for spell by name (case-insensitive) or ID
+                skills = data.get('skills', {})
+
+                for skill_id_candidate, skill in skills.items():
+                    if not isinstance(skill, dict):
+                        continue
+                    skill_name = skill.get('name', '')
+                    if (skill_name.lower() == spell_name.lower() or
+                        skill_id_candidate.lower() == spell_name.lower() or
+                        spell_name.lower() in skill_name.lower()):
+                        spell_data = skill
+                        spell_id = skill_id_candidate
+                        break
+
+                if not spell_data:
+                    return [types.TextContent(
+                        type="text",
+                        text=(
+                            f"Spell gem '{spell_name}' not found in either "
+                            "data/game/skill_gems/ or data/pob_complete_skills.json"
+                        )
+                    )]
+
+                data_source_note = (
+                    f"**Data Source**: data/pob_complete_skills.json "
+                    f"(Path of Building legacy data, "
+                    f"{data.get('metadata', {}).get('extraction_date', 'Unknown date')} "
+                    f"— pre-0.5; not yet in data/game/skill_gems/)\n"
+                )
 
             # Format response
             response = f"# {spell_data.get('name', spell_name)}\n\n"
@@ -3438,6 +3534,32 @@ Consider:
             # Description
             if spell_data.get('description'):
                 response += f"**Description**: {spell_data['description']}\n\n"
+
+            # Gem metadata block — only from new dataset (Gems.lua-sourced)
+            extras = spell_data.get('_new_dataset_extras')
+            if extras:
+                response += "**Gem Metadata** (PoB2 Gems.lua):\n"
+                if extras.get('gem_type'):
+                    response += f"  - Gem Type: {extras['gem_type']}\n"
+                if extras.get('tier') is not None:
+                    response += f"  - Tier: {extras['tier']}\n"
+                if extras.get('natural_max_level') is not None:
+                    response += f"  - Natural Max Level: {extras['natural_max_level']}\n"
+                if extras.get('requirements'):
+                    r = extras['requirements']
+                    response += (
+                        f"  - Requirements: Str {r.get('str', 0)}, "
+                        f"Dex {r.get('dex', 0)}, Int {r.get('int', 0)}\n"
+                    )
+                if extras.get('weapon_requirements'):
+                    response += f"  - Weapon Requirements: {extras['weapon_requirements']}\n"
+                if extras.get('tag_string'):
+                    response += f"  - Tag String: {extras['tag_string']}\n"
+                if extras.get('tags'):
+                    response += f"  - Tags: {', '.join(extras['tags'])}\n"
+                if extras.get('additional_stat_sets'):
+                    response += f"  - Additional Stat Sets: {', '.join(extras['additional_stat_sets'])}\n"
+                response += "\n"
 
             # Skill types (tags)
             if spell_data.get('skillTypes'):
@@ -3486,21 +3608,37 @@ Consider:
 
             # StatSets (damage effectiveness, constantStats)
             stat_sets = spell_data.get('statSets', [])
+            # Drop entries where both label and baseEffectiveness are unset — these are
+            # placeholder slots in the v1 skill_gems schema; surfacing them as "None: None%"
+            # is noise. The legacy pob_complete_skills.json doesn't have this problem.
+            stat_sets = [
+                s for s in stat_sets
+                if s.get('label') is not None or s.get('baseEffectiveness') is not None
+            ]
             if stat_sets:
                 response += "**Stat Sets**:\n"
                 for i, stat_set in enumerate(stat_sets):
-                    label = stat_set.get('label', f'Set {i+1}')
+                    label = stat_set.get('label') or f'Set {i+1}'
                     response += f"\n{label}:\n"
 
                     # Damage effectiveness
-                    if 'baseEffectiveness' in stat_set:
-                        base_eff = stat_set['baseEffectiveness']
-                        incr_eff = stat_set.get('incrementalEffectiveness', 0)
-                        response += f"  - Base Effectiveness: {base_eff}%\n"
+                    base_eff = stat_set.get('baseEffectiveness')
+                    if base_eff is not None:
+                        # Round noisy floats from the v1 extractor (e.g. 1.5199999809265)
+                        try:
+                            base_eff_disp = round(float(base_eff), 4)
+                        except (TypeError, ValueError):
+                            base_eff_disp = base_eff
+                        response += f"  - Base Effectiveness: {base_eff_disp}\n"
+                        incr_eff = stat_set.get('incrementalEffectiveness')
                         if incr_eff:
-                            response += f"  - Incremental Effectiveness: {incr_eff}% per level\n"
+                            try:
+                                incr_eff_disp = round(float(incr_eff), 4)
+                            except (TypeError, ValueError):
+                                incr_eff_disp = incr_eff
+                            response += f"  - Incremental Effectiveness: {incr_eff_disp} per level\n"
 
-                    # Constant stats (built-in modifiers)
+                    # Constant stats (built-in modifiers) — legacy only
                     const_stats = stat_set.get('constantStats', [])
                     if const_stats:
                         response += f"  - Built-in Modifiers:\n"
@@ -3523,7 +3661,7 @@ Consider:
                         response += f"  - {stat_id}: {value} per 1% quality\n"
                 response += "\n"
 
-            response += f"**Data Source**: pob_complete_skills.json (Path of Building, {data.get('metadata', {}).get('extraction_date', 'Unknown date')})\n"
+            response += data_source_note
 
             return [types.TextContent(type="text", text=response)]
 
@@ -3645,7 +3783,11 @@ Consider:
         return result
 
     async def _handle_list_all_spells(self, args: dict) -> List[types.TextContent]:
-        """List all spell/active skill gems with filtering, sorting, pagination, and output format options."""
+        """List all spell/active skill gems with filtering, sorting, pagination, and output format options.
+
+        Prefers the fresh data/game/skill_gems/skill_gems.json (Patch 0.5). Falls back
+        to legacy data/pob_complete_skills.json (Dec 2025) if the new dataset is missing.
+        """
         try:
             from src.utils.response_formatter import (
                 PaginationMeta, filter_fields, format_list_response,
@@ -3661,61 +3803,114 @@ Consider:
             detail = args.get("detail", "standard")
             output_format = args.get("format", "markdown")
 
-            # Load from pob_complete_skills.json (has complete data)
-            pob_skills_file = Path(__file__).parent.parent / 'data' / 'pob_complete_skills.json'
-
-            if not pob_skills_file.exists():
-                return [types.TextContent(type="text", text="Error: pob_complete_skills.json not found")]
-
-            with open(pob_skills_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            # Extract and filter spells
             all_spells = []
-            skills = data.get('skills', {})
 
-            for skill_id, skill_data in skills.items():
-                if not isinstance(skill_data, dict):
-                    continue
+            # --- Tier 1: prefer the fresh 0.5 dataset ---
+            new_dataset_file = Path(__file__).parent.parent / 'data' / 'game' / 'skill_gems' / 'skill_gems.json'
 
-                if skill_data.get('hidden'):
-                    continue
+            if new_dataset_file.exists():
+                with open(new_dataset_file, 'r', encoding='utf-8') as f:
+                    new_data = json.load(f)
+                # Active-spell selection: gem_type == 'Spell' (PoB2's own categorization).
+                # This is intentionally narrower than the old "any gem with cast_time" —
+                # it matches the dataset's authoritative Gems.lua classification.
+                for gem in new_data.get('skill_gems', []):
+                    if gem.get('gem_type') != 'Spell':
+                        continue
+                    ge = gem.get('granted_effect') or {}
+                    skill_types = ge.get('skill_types') or []
 
-                name = skill_data.get('name', skill_id)
-                skill_types = skill_data.get('skillTypes', [])
+                    if filter_tags:
+                        if not any(tag.lower() in [st.lower() for st in skill_types] for tag in filter_tags):
+                            continue
 
-                if filter_tags:
-                    if not any(tag.lower() in [st.lower() for st in skill_types] for tag in filter_tags):
+                    element = 'Physical'
+                    for st in skill_types:
+                        if st in ['Fire', 'Cold', 'Lightning', 'Chaos']:
+                            element = st
+                            break
+                    if filter_element and element.lower() != filter_element.lower():
                         continue
 
-                levels = skill_data.get('levels', {})
-                level_20_data = levels.get('20', levels.get('1', {}))
-                cast_time = skill_data.get('castTime', 0)
-                base_mult = level_20_data.get('baseMultiplier', 0)
-                cost = level_20_data.get('cost', {})
-                mana_cost = cost.get('Mana', 0)
+                    levels = ge.get('levels') or {}
+                    # Pick the highest available level (20 is the typical PoB cap)
+                    lvl20 = levels.get('20') or levels.get('1') or {}
+                    cost = lvl20.get('cost') or {}
+                    # v1 schema: cost is {type: 'Mana', value: N}
+                    mana_cost = cost.get('value', 0) if cost.get('type') == 'Mana' else 0
 
-                element = 'Physical'
-                for st in skill_types:
-                    if st in ['Fire', 'Cold', 'Lightning', 'Chaos']:
-                        element = st
-                        break
+                    all_spells.append({
+                        'name': gem.get('name'),
+                        'id': gem.get('gem_id') or gem.get('variant_id'),
+                        'element': element,
+                        'tags': skill_types,
+                        'base_multiplier': 0,  # not in v1 schema
+                        'cast_time': ge.get('cast_time') or 0,
+                        'mana_cost': mana_cost,
+                        'description': '',  # not in v1 schema
+                        'skill_types': skill_types,
+                        'levels': levels,
+                    })
 
-                if filter_element and element.lower() != filter_element.lower():
-                    continue
+            # --- Tier 2: legacy fallback if new dataset missing or empty ---
+            if not all_spells:
+                pob_skills_file = Path(__file__).parent.parent / 'data' / 'pob_complete_skills.json'
 
-                all_spells.append({
-                    'name': name,
-                    'id': skill_id,
-                    'element': element,
-                    'tags': skill_types,
-                    'base_multiplier': base_mult,
-                    'cast_time': cast_time,
-                    'mana_cost': mana_cost,
-                    'description': skill_data.get('description', ''),
-                    'skill_types': skill_types,
-                    'levels': levels
-                })
+                if not pob_skills_file.exists():
+                    return [types.TextContent(
+                        type="text",
+                        text=(
+                            "Error: neither data/game/skill_gems/skill_gems.json "
+                            "nor data/pob_complete_skills.json available"
+                        )
+                    )]
+
+                with open(pob_skills_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                skills = data.get('skills', {})
+
+                for skill_id, skill_data in skills.items():
+                    if not isinstance(skill_data, dict):
+                        continue
+                    if skill_data.get('hidden'):
+                        continue
+
+                    name = skill_data.get('name', skill_id)
+                    skill_types = skill_data.get('skillTypes', [])
+
+                    if filter_tags:
+                        if not any(tag.lower() in [st.lower() for st in skill_types] for tag in filter_tags):
+                            continue
+
+                    levels = skill_data.get('levels', {})
+                    level_20_data = levels.get('20', levels.get('1', {}))
+                    cast_time = skill_data.get('castTime', 0)
+                    base_mult = level_20_data.get('baseMultiplier', 0)
+                    cost = level_20_data.get('cost', {})
+                    mana_cost = cost.get('Mana', 0)
+
+                    element = 'Physical'
+                    for st in skill_types:
+                        if st in ['Fire', 'Cold', 'Lightning', 'Chaos']:
+                            element = st
+                            break
+
+                    if filter_element and element.lower() != filter_element.lower():
+                        continue
+
+                    all_spells.append({
+                        'name': name,
+                        'id': skill_id,
+                        'element': element,
+                        'tags': skill_types,
+                        'base_multiplier': base_mult,
+                        'cast_time': cast_time,
+                        'mana_cost': mana_cost,
+                        'description': skill_data.get('description', ''),
+                        'skill_types': skill_types,
+                        'levels': levels
+                    })
 
             # Sort
             if sort_by == "base_damage" or sort_by == "base_multiplier":
