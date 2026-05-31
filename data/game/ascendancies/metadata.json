@@ -14,10 +14,11 @@
   "record_count": 37,
   "active_count": 23,
   "unused_count": 14,
-  "sha256": "bbe85d5c32deeec2c037cf2afdfebf56c030a417ce289ccca0d11759e92ca09d",
-  "bytes": 5264,
+  "sha256": "44213deb95453c61292d688bc9f492edbf93b41f1dce24f7aa83f1f0eabc3130",
+  "bytes": 6437,
   "schema_notes": [
-    "Each entry has row_index, id, display_name, is_unused.",
+    "Each entry has row_index, id, display_name, base_class, is_unused.",
+    "base_class is derived from the id prefix (e.g. Warrior1 -> Warrior, Witch3b -> Witch, Sorceress2 -> Sorceress). Promoted to a first-class field 2026-05-31 so AI callers can filter 'show me all Witch ascendancies' without parsing the id prefix.",
     "display_name is now the canonical name from ascendancy.datc64 offset 44 (verified clean across all 37 rows; previous heuristic-of-longest-string approach was wrong and produced art-asset paths and flavor text).",
     "is_unused=true for [DNT-UNUSED] placeholder rows (e.g. fishing-themed PoE1 leftovers); 14 of 37 rows are placeholders.",
     "id is the canonical internal name (e.g., 'Warrior1' = Titan, 'Witch3' = Lich, 'Witch3b' = Abyssal Lich)."
