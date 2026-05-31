@@ -6,21 +6,27 @@ This directory is the **repo-as-source-of-truth** for game data the MCP consumes
 
 ```
 data/game/
-├── version.json            # Global manifest: patch version, datasets, revisions
-├── README.md               # This file
+├── version.json                  # Global manifest: patch version, datasets, revisions
+├── README.md                     # This file
 ├── mods/
-│   ├── mods.json           # Mod records (~17k mods in 0.5)
-│   └── metadata.json       # Extraction provenance + SHA-256
+│   ├── mods.json                 # 16,788 mod records (0.5) — stat_ids inline-resolved
+│   └── metadata.json             # Extraction provenance + SHA-256
 ├── passive_tree/
-│   ├── tree.json           # Passive tree nodes (~10k nodes in 0.5)
+│   ├── tree.json                 # 9,605 passive tree nodes (0.5)
 │   └── metadata.json
-├── ascendancies/           # (pending 0.5 re-extract)
-├── support_gems/           # (pending 0.5 re-extract)
-├── stats/                  # (pending 0.5 re-extract)
-└── ...
+├── ascendancies/
+│   ├── ascendancies.json         # 37 ascendancies (23 active, incl. NEW 0.5 Spirit Walker + Martial Artist)
+│   └── metadata.json
+├── support_gems/
+│   ├── support_gems.json         # 680 support gems
+│   └── metadata.json
+├── stats/
+│   ├── stats.json                # 26,943 canonical stat IDs (row_index → stat_id)
+│   └── metadata.json
+└── skill_gems/                   # (pending — extractor port in progress)
 ```
 
-Each dataset folder has at minimum a data JSON and a `metadata.json` describing what's inside, when it was extracted, and a SHA-256 for integrity.
+Each dataset folder has at minimum a data JSON and a `metadata.json` describing what's inside, when it was extracted, and a SHA-256 for integrity. The `record_count` and per-dataset notes in the global `version.json` are the authoritative summary; the layout block above is informational.
 
 ## How to use this data from code
 
@@ -55,4 +61,16 @@ The previous GitHub Releases zip distribution model (`src/data/data_distributor.
 
 ## Current 0.5 status
 
-See `version.json` `datasets` (delivered) and `datasets_pending_0_5_reextract` (blockers + interim file locations). At time of writing: **mods** and **passive_tree** are 0.5-fresh; **ascendancies / support_gems / stats / skill_gems** are pending.
+See `version.json` `datasets` (delivered) and `datasets_pending_0_5_reextract` (blockers + interim file locations).
+
+As of `data-v0.5.0-r5` (2026-05-31):
+
+| Dataset | 0.5-fresh? | Notes |
+|---|---|---|
+| `mods` | YES | 16,788 records, stat_ids inline-resolved (no separate stats.json load needed at read time) |
+| `passive_tree` | YES | 9,605 nodes |
+| `ascendancies` | YES | 37 records, includes new Patch 0.5 Spirit Walker (Huntress) + Martial Artist (Monk) |
+| `support_gems` | YES | 680 records |
+| `stats` | YES | 26,943 canonical stat IDs |
+| `skill_gems` | PENDING | PoB2 community shipped 0.5 `Gems.lua` + `tree.lua` upstream on 2026-05-29 (patch day); extractor port from `scripts/extract_complete_pob_skills.py` is the remaining work. Interim source: `data/pob_active_skills.json` (Dec 2025, pre-0.5). |
+
