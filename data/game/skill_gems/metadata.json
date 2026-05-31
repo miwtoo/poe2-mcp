@@ -1,0 +1,51 @@
+{
+  "dataset": "skill_gems",
+  "filename": "skill_gems.json",
+  "patch_version": "0.5",
+  "patch_name": "Return of the Ancients",
+  "patch_released": "2026-05-29",
+  "extracted_at": "2026-05-31T15:34:53Z",
+  "extracted_by": "HivemindMinion (Claude Code) — port of scripts/extract_skill_gems_v2.py",
+  "source_repo": "PathOfBuilding-Community/PathOfBuilding-PoE2",
+  "source_ref": "origin/dev",
+  "source_commit": "9c2bf0316fd53bc21137017fde399c9410b734d2",
+  "source_commit_date": "2026-05-30T01:36:57+10:00",
+  "source_files": [
+    "src/Data/Gems.lua",
+    "src/Data/Skills/act_dex.lua",
+    "src/Data/Skills/act_int.lua",
+    "src/Data/Skills/act_str.lua",
+    "src/Data/Skills/sup_dex.lua",
+    "src/Data/Skills/sup_int.lua",
+    "src/Data/Skills/sup_str.lua",
+    "src/Data/Skills/minion.lua",
+    "src/Data/Skills/other.lua",
+    "src/Data/Skills/spectre.lua"
+  ],
+  "extractor": "scripts/extract_skill_gems_v2.py",
+  "record_count": 872,
+  "matched_effect_count": 872,
+  "unmatched_count": 0,
+  "per_skills_file_counts": {
+    "src/Data/Skills/act_dex.lua": 64,
+    "src/Data/Skills/act_int.lua": 151,
+    "src/Data/Skills/act_str.lua": 141,
+    "src/Data/Skills/sup_dex.lua": 160,
+    "src/Data/Skills/sup_int.lua": 197,
+    "src/Data/Skills/sup_str.lua": 214,
+    "src/Data/Skills/minion.lua": 42,
+    "src/Data/Skills/other.lua": 74,
+    "src/Data/Skills/spectre.lua": 183
+  },
+  "bytes": 1648157,
+  "sha256": "4fe3f928f146f1d40687b8a325cfc01c089962f7641df4279eb7ef5b8cbd5f44",
+  "schema_notes": [
+    "schema_version=1. One record per gem (joined view): Gems.lua metadata + matched Skills/*.lua granted_effect.",
+    "granted_effect MAY be null when grantedEffectId is missing or doesn't appear in any Skills file (e.g. UI-only gems, legacy entries).",
+    "Per-level data extracts: crit_chance, level_requirement, cost ({type, value} for the first cost type only), cooldown, pvp_damage_multiplier.",
+    "stat_sets v1 extracts: index, label, base_effectiveness, incremental_effectiveness, damage_incremental_effectiveness. The full statMap / baseFlags / constantStats / stats lists are NOT extracted in v1 — they need structural Lua parsing.",
+    "additional_stat_sets is a list of effect_id strings referenced from Gems.lua; consumers can look those up in Skills/*.lua separately.",
+    "Snake_case keys throughout, matching other data/game/ datasets."
+  ],
+  "data_policy": "Extracted from the upstream PathOfBuilding-PoE2 community repo (open-source). No third-party wiki / scraped data."
+}
