@@ -734,16 +734,28 @@ class PoE2BuildOptimizerMCP:
                 # Mechanic Explanations
                 types.Tool(
                     name="explain_mechanic",
-                    description="Explain PoE2 game mechanics (ailments, crowd control, damage scaling, etc.). Returns detailed explanations with formulas.",
+                    description=(
+                        "Explain PoE2 game mechanics or look up a stat_id. PRIMARY source: "
+                        "data/game/stat_descriptions/ (canonical game-shipped text, "
+                        "16,533 entries extracted from .csd). FALLBACK: hand-authored "
+                        "summaries in src/knowledge/poe2_mechanics.py (clearly labeled as "
+                        "community interpretation in the response). Call without "
+                        "mechanic_name to see what's available."
+                    ),
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "mechanic_name": {
                                 "type": "string",
-                                "description": "Mechanic to explain (e.g., 'freeze', 'stun', 'critical strike')"
+                                "description": (
+                                    "Mechanic name (e.g. 'freeze', 'ignite proliferation'), "
+                                    "or a stat_id (e.g. 'support_ignite_proliferation_radius'), "
+                                    "or a substring to search (e.g. 'proliferation'). "
+                                    "Omit entirely to see overview + sample suggestions."
+                                )
                             }
                         },
-                        "required": ["mechanic_name"]
+                        "required": []
                     }
                 ),
 
@@ -2832,59 +2844,163 @@ Consider:
             )]
 
     async def _handle_explain_mechanic(self, args: dict) -> List[types.TextContent]:
-        """Explain a PoE2 game mechanic"""
-        try:
-            mechanic_name = args.get("mechanic_name", "").lower()
+        """Explain a PoE2 game mechanic — canonical game text first, fallback to legacy.
 
+        Tier 1 (PRIMARY): data/game/stat_descriptions/ — game-shipped .csd text,
+        16,533 entries, source-tagged for provenance. find_stat_description() for
+        exact stat_id match, search_stat_descriptions() for substring recovery.
+
+        Tier 2 (FALLBACK): src/knowledge/poe2_mechanics.py — hand-authored
+        summaries (community interpretation of wiki sources). Useful for
+        high-level concepts like "ignite" / "rage" that aren't single stat_ids.
+        Responses from this tier are clearly labeled as such so the caller knows
+        the provenance.
+
+        Closes HivemindOverlord's 2026-05-31 feedback re: explain_mechanic
+        returning hand-authored interpretation dressed up as authoritative data.
+        """
+        # Local import to avoid circulars during module load + to keep the
+        # handler's dependency on data helpers explicit
+        from src.data.game_data import find_stat_description, search_stat_descriptions
+
+        try:
+            raw_query = (args.get("mechanic_name") or "").strip()
+            mechanic_name = raw_query.lower()
+
+            # ---- No query: overview + sample suggestions from both tiers ----
             if not mechanic_name:
-                # Show available mechanics from the mechanics dictionary
-                response = "# Available PoE2 Mechanics\n\n"
-                response += "**Common mechanics to ask about:**\n"
-                response += "- Ailments: freeze, chill, ignite, shock, poison, bleed\n"
-                response += "- Damage: critical strike, damage conversion, penetration\n"
-                response += "- Defense: armor, evasion, energy shield, block, deflect\n"
-                response += "- Crowd Control: stun, knockback, taunt\n"
-                response += "- Resources: mana, life, energy shield, spirit\n"
-                response += "- Other: accuracy, attack speed, cast speed\n\n"
-                response += "**Usage:** Call this tool with a mechanic name (e.g., 'freeze', 'stun', 'critical strike')"
+                response = "# PoE2 Mechanic / Stat Description Lookup\n\n"
+                response += (
+                    "Call this tool with `mechanic_name` set to either:\n"
+                    "- A mechanic name: `freeze`, `ignite`, `stun`, `critical strike`\n"
+                    "- A stat_id: `support_ignite_proliferation_radius`, "
+                    "`base_chance_to_ignite_%`\n"
+                    "- A substring to search: `proliferation`, `spread`, `regeneration`\n\n"
+                )
+                response += "## Tier 1 — canonical game text\n"
+                response += (
+                    "16,533 stat descriptions extracted from .csd files. "
+                    "Lookup is exact-match on stat_id, with substring fuzzy match "
+                    "as fallback (returns 'did you mean' suggestions).\n\n"
+                )
+                response += "## Tier 2 — hand-authored summaries\n"
+                response += (
+                    "High-level mechanic explanations (ignite/freeze/rage/etc.) "
+                    "with formulas and common-questions. Returned when no exact "
+                    "stat_id matches.\n\n"
+                )
+                response += "**Data source**: data/game/stat_descriptions/ + src/knowledge/poe2_mechanics.py\n"
                 return [types.TextContent(type="text", text=response)]
 
             debug_log(f"Explaining mechanic: {mechanic_name}")
 
-            # Try direct lookup first
-            mechanic = self.mechanics_kb.get_mechanic(mechanic_name)
+            # ---- Tier 1a: exact stat_id match in the canonical dataset ----
+            exact = find_stat_description(raw_query)
+            if exact:
+                response = self._format_stat_description_response(exact, raw_query)
+                logger.info(f"Explained via Tier 1 exact: {raw_query}")
+                return [types.TextContent(type="text", text=response)]
 
-            # If not found, try search
-            if not mechanic:
-                search_results = self.mechanics_kb.search_mechanics(mechanic_name)
-                if search_results:
-                    mechanic = search_results[0]
+            # ---- Tier 2: legacy hand-authored mechanics (high-level concepts) ----
+            # Try this BEFORE Tier 1b (substring search) because for queries like
+            # "ignite" or "freeze" the legacy entry gives a fuller answer than
+            # the dozens of stat_id substring matches would.
+            # Defensive: mechanics_kb may not be initialized (lazy / failed
+            # init / smoke-test path) — treat as "no Tier 2 available" and
+            # fall through to Tier 1b substring search.
+            mechanic = None
+            qa_answer = None
+            if self.mechanics_kb is not None:
+                mechanic = self.mechanics_kb.get_mechanic(mechanic_name)
+                if not mechanic:
+                    search_results = self.mechanics_kb.search_mechanics(mechanic_name)
+                    if search_results:
+                        mechanic = search_results[0]
+                if not mechanic:
+                    qa_answer = self.mechanics_kb.answer_question(mechanic_name)
+            if qa_answer:
+                # Wrap with provenance disclaimer
+                response = (
+                    "> **Source**: hand-authored summary in "
+                    "`src/knowledge/poe2_mechanics.py` — community "
+                    "interpretation of wiki sources, not extracted game text. "
+                    "Cross-reference against the in-game tooltip for "
+                    "balance-sensitive numbers.\n\n"
+                )
+                response += qa_answer
+                return [types.TextContent(type="text", text=response)]
 
-            # If still not found, try answering as a question
-            if not mechanic:
-                answer = self.mechanics_kb.answer_question(mechanic_name)
-                if answer:
-                    return [types.TextContent(type="text", text=answer)]
-                else:
-                    return [types.TextContent(
-                        type="text",
-                        text=f"Mechanic '{mechanic_name}' not found. Use this tool without arguments to see available mechanics."
-                    )]
+            if mechanic:
+                response = (
+                    "> **Source**: hand-authored summary in "
+                    "`src/knowledge/poe2_mechanics.py` — community "
+                    "interpretation of wiki sources, not extracted game text. "
+                    "Cross-reference against the in-game tooltip for "
+                    "balance-sensitive numbers.\n\n"
+                )
+                response += self.mechanics_kb.format_mechanic_explanation(mechanic)
 
-            # Format explanation
-            response = self.mechanics_kb.format_mechanic_explanation(mechanic)
+                try:
+                    official_strings = await self.mechanics_kb.get_official_terminology(mechanic.name)
+                    if official_strings:
+                        official_text = self.mechanics_kb.enhance_explanation_with_official_text(
+                            mechanic, official_strings
+                        )
+                        response += official_text
+                except Exception as e:
+                    logger.debug(f"Could not fetch official terminology: {e}")
 
-            # Enhance with official .datc64 clientstrings if available
-            try:
-                official_strings = await self.mechanics_kb.get_official_terminology(mechanic.name)
-                if official_strings:
-                    official_text = self.mechanics_kb.enhance_explanation_with_official_text(mechanic, official_strings)
-                    response += official_text
-            except Exception as e:
-                logger.debug(f"Could not fetch official terminology: {e}")
+                # If the query also matches stat_ids in Tier 1, surface them as
+                # cross-refs so users can see the canonical entries
+                t1_hits = search_stat_descriptions(raw_query, limit=5)
+                if t1_hits:
+                    response += "\n\n## Related canonical stat descriptions (Tier 1)\n"
+                    for h in t1_hits:
+                        response += f"- `{h['primary_stat_id']}` ({h['source_csd']})\n"
+                    response += (
+                        "\nQuery any of these stat_ids directly for the exact "
+                        "game-shipped text.\n"
+                    )
 
-            logger.info(f"Explained mechanic: {mechanic_name}")
-            return [types.TextContent(type="text", text=response)]
+                logger.info(f"Explained via Tier 2: {mechanic_name}")
+                return [types.TextContent(type="text", text=response)]
+
+            # ---- Tier 1b: substring search across the canonical dataset ----
+            t1_hits = search_stat_descriptions(raw_query, limit=10)
+            if t1_hits:
+                response = f"# Suggestions for `{raw_query}`\n\n"
+                response += (
+                    f"No exact match in either tier. Found {len(t1_hits)} stat_id"
+                    f"{'s' if len(t1_hits) != 1 else ''} matching that substring "
+                    f"in the canonical dataset. Query any of these directly for "
+                    f"its full description:\n\n"
+                )
+                for h in t1_hits:
+                    template = (h.get('primary_template') or '').replace('\n', ' ')
+                    if len(template) > 120:
+                        template = template[:117] + '...'
+                    response += f"- **`{h['primary_stat_id']}`** ({h['source_csd']}, matched on {h['match_field']})\n"
+                    if template:
+                        response += f"  > {template}\n"
+                response += (
+                    f"\n**Data source**: data/game/stat_descriptions/ — "
+                    f"16,533 canonical game-shipped stat descriptions.\n"
+                )
+                return [types.TextContent(type="text", text=response)]
+
+            # ---- Total miss: helpful failure with both-tier exhaustion noted ----
+            return [types.TextContent(
+                type="text",
+                text=(
+                    f"No match for `{raw_query}` in either tier:\n"
+                    f"- Tier 1 (canonical stat_descriptions, 16,533 entries): "
+                    f"no exact stat_id match, no substring matches in stat_ids or templates\n"
+                    f"- Tier 2 (hand-authored mechanics): no match by name, search, or Q&A\n\n"
+                    f"Try a broader substring (`proliferation` instead of "
+                    f"`fire_proliferation_radius_multiplier`), or call this tool "
+                    f"without arguments to see what categories are available."
+                )
+            )]
 
         except Exception as e:
             logger.error(f"Error explaining mechanic: {e}", exc_info=True)
@@ -2892,6 +3008,60 @@ Consider:
                 type="text",
                 text=f"Error explaining mechanic: {str(e)}"
             )]
+
+    def _format_stat_description_response(self, record: dict, query: str) -> str:
+        """Format a Tier 1 stat_description record as the explain_mechanic response.
+
+        Includes the canonical game-shipped template, variant range conditions,
+        handler chain, multi-stat cross-refs, and a provenance line. This is the
+        opposite-of-hand-authored: every field is sourced.
+        """
+        primary_stat = record.get('primary_stat_id')
+        all_stats = record.get('stat_ids') or []
+        primary_template = record.get('primary_template') or ''
+        variants = record.get('variants') or []
+        source_csd = record.get('source_csd', '?')
+        source_file = record.get('source_file', '?')
+        source_line = record.get('source_line')
+
+        response = f"# `{primary_stat}`\n\n"
+
+        if primary_template:
+            response += "## Game text (canonical)\n"
+            # Render newlines as-is so the markdown shows the multi-line tooltip shape
+            response += primary_template.replace('\\n', '\n') + '\n\n'
+
+        if len(all_stats) > 1:
+            response += "## Shared description with\n"
+            for sid in all_stats[1:]:
+                response += f"- `{sid}`\n"
+            response += '\n'
+
+        if len(variants) > 1:
+            response += f"## Variants ({len(variants)})\n"
+            response += (
+                "Different display text by stat value range. `#` = default/any, "
+                "`1`/`10` = exact value, `1|#` = >=1, `#|0` = <=0.\n\n"
+            )
+            for i, v in enumerate(variants):
+                rng = v.get('range', '?')
+                tmpl = (v.get('template') or '').replace('\\n', ' ')
+                if len(tmpl) > 200:
+                    tmpl = tmpl[:197] + '...'
+                handlers = v.get('handlers') or []
+                response += f"**Range `{rng}`**: {tmpl}\n"
+                if handlers:
+                    response += f"  - Handlers: `{' '.join(handlers)}`\n"
+                response += '\n'
+
+        response += (
+            f"---\n"
+            f"**Data source**: `data/game/stat_descriptions/{source_file}` "
+            f"line {source_line} (extracted from `data/extracted/Data/statdescriptions/{source_csd}`)\n"
+            f"**Provenance**: Canonical game-shipped text (UTF-16 .csd, "
+            f"PoE2 0.5). Not hand-authored interpretation.\n"
+        )
+        return response
 
     async def _handle_get_formula(self, args: dict) -> List[types.TextContent]:
         """Get a PoE2 calculation formula for Claude to use"""
