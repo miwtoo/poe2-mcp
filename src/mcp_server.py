@@ -106,6 +106,15 @@ def debug_log(message):
     """Direct logging to stderr for Claude Desktop"""
     print(f"[MCP-SERVER] {message}", file=sys.stderr, flush=True)
 
+
+# Shared text-search helpers (P2 / #115). Lives in a separate module so test
+# files can import the helper without triggering full mcp_server init.
+try:
+    from .text_search import did_you_mean
+except ImportError:
+    from src.text_search import did_you_mean
+
+
 debug_log("=== PoE2 Build Optimizer MCP Server ===")
 debug_log(f"Python version: {sys.version}")
 debug_log(f"Working directory: {Path.cwd()}")
@@ -3781,14 +3790,50 @@ Consider:
                             break
 
             if not support_data:
-                return [types.TextContent(
-                    type="text",
-                    text=(
+                # Did-you-mean suggestions (P2 / #115). Search both canonical
+                # support_gems and skill_gems (Tier-2) name pools.
+                pool = []
+                try:
+                    for gem in fresh_provider.get_all_support_gems().values():
+                        n = gem.get('display_name') or gem.get('name')
+                        if n:
+                            pool.append(n)
+                except Exception:
+                    pass
+                # Also pull Support-typed names from skill_gems
+                new_dataset_file = Path(__file__).parent.parent / 'data' / 'game' / 'skill_gems' / 'skill_gems.json'
+                if new_dataset_file.exists():
+                    try:
+                        with open(new_dataset_file, 'r', encoding='utf-8') as f:
+                            sg_data = json.load(f)
+                        for gem in sg_data.get('skill_gems', []):
+                            if gem.get('gem_type') == 'Support':
+                                n = gem.get('name')
+                                if n:
+                                    pool.append(n)
+                    except Exception:
+                        pass
+                suggestions = did_you_mean(support_name, pool, k=5)
+                if suggestions:
+                    response = (
+                        f"# Support Gem Not Found\n\n"
+                        f"No exact match for '{support_name}'. Did you mean:\n\n"
+                    )
+                    for name in suggestions:
+                        response += f"- {name}\n"
+                    response += (
+                        f"\nCall ``inspect_support_gem`` with one of these "
+                        f"names for full stats.\n"
+                    )
+                else:
+                    response = (
                         f"Support gem '{support_name}' not found in "
                         f"data/game/support_gems/ (.datc64 extract) or "
-                        f"data/game/skill_gems/ (PoB2 gem_type='Support')."
+                        f"data/game/skill_gems/ (PoB2 gem_type='Support'), "
+                        f"and no close name candidates. ``list_all_supports`` "
+                        f"will enumerate every support.\n"
                     )
-                )]
+                return [types.TextContent(type="text", text=response)]
 
             # Format response
             response = f"# {support_data.get('name', support_name)}\n\n"
@@ -4000,13 +4045,47 @@ Consider:
                         break
 
                 if not spell_data:
-                    return [types.TextContent(
-                        type="text",
-                        text=(
-                            f"Spell gem '{spell_name}' not found in either "
-                            "data/game/skill_gems/ or data/pob_complete_skills.json"
+                    # Did-you-mean suggestions (P2 / #115). Pool names from
+                    # both skill_gems and the legacy file.
+                    pool = []
+                    if new_dataset_file.exists():
+                        try:
+                            with open(new_dataset_file, 'r', encoding='utf-8') as f:
+                                sg = json.load(f)
+                            for gem in sg.get('skill_gems', []):
+                                # Skip supports — inspect_support_gem handles those.
+                                if gem.get('gem_type') == 'Support':
+                                    continue
+                                n = gem.get('name')
+                                if n:
+                                    pool.append(n)
+                        except Exception:
+                            pass
+                    for skill in skills.values():
+                        if isinstance(skill, dict):
+                            n = skill.get('name')
+                            if n:
+                                pool.append(n)
+                    suggestions = did_you_mean(spell_name, pool, k=5)
+                    if suggestions:
+                        response = (
+                            f"# Spell Gem Not Found\n\n"
+                            f"No exact match for '{spell_name}'. Did you mean:\n\n"
                         )
-                    )]
+                        for name in suggestions:
+                            response += f"- {name}\n"
+                        response += (
+                            f"\nCall ``inspect_spell_gem`` with one of these "
+                            f"names for full stats.\n"
+                        )
+                    else:
+                        response = (
+                            f"Spell gem '{spell_name}' not found in either "
+                            f"data/game/skill_gems/ or data/pob_complete_skills.json, "
+                            f"and no close name candidates. ``list_all_spells`` "
+                            f"will enumerate every spell.\n"
+                        )
+                    return [types.TextContent(type="text", text=response)]
 
                 data_source_note = (
                     f"**Data Source**: data/pob_complete_skills.json "
@@ -5021,13 +5100,29 @@ Could not extract account and character from URL.
                         break
 
             if not found:
-                # List available keystones
-                available = [k.name for k in keystones if k][:10]
-                return [types.TextContent(
-                    type="text",
-                    text=f"# Keystone Not Found\n\nNo keystone matching '{keystone_name}'.\n\n**Available keystones (sample):**\n" +
-                         "\n".join(f"- {name}" for name in available)
-                )]
+                # Did-you-mean suggestions (P2 / #115). Substring + fuzzy match
+                # over all keystone names instead of returning a random sample.
+                all_names = [k.name for k in keystones if k]
+                suggestions = did_you_mean(keystone_name, all_names, k=5)
+                if suggestions:
+                    response = (
+                        f"# Keystone Not Found\n\n"
+                        f"No exact match for '{keystone_name}'. Did you mean:\n\n"
+                    )
+                    for name in suggestions:
+                        response += f"- {name}\n"
+                    response += (
+                        f"\nCall ``inspect_keystone`` with one of these names "
+                        f"for full stats.\n"
+                    )
+                else:
+                    response = (
+                        f"# Keystone Not Found\n\n"
+                        f"No keystone matching '{keystone_name}' and no close "
+                        f"name candidates. ``list_all_keystones`` will enumerate "
+                        f"every keystone in the local passive tree.\n"
+                    )
+                return [types.TextContent(type="text", text=response)]
 
             # Format detailed response
             response = f"# {found.name}\n\n"
