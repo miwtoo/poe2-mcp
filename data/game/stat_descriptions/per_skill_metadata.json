@@ -1,0 +1,25 @@
+{
+  "dataset": "per_skill_stat_descriptions",
+  "filename": "per_skill_stat_descriptions.json",
+  "schema_version": 1,
+  "patch_version": "0.5",
+  "patch_name": "Return of the Ancients",
+  "extracted_at": "2026-06-01T18:58:38Z",
+  "source_dir": "data/extracted/Data/statdescriptions/specific_skill_stat_descriptions",
+  "source_format": "UTF-16-LE .csd (Compiled Stat Description, PoB-compatible grammar)",
+  "extractor": "scripts/extract_per_skill_stat_descriptions.py",
+  "parser_module": "src/parsers/csd_parser.py",
+  "file_count": 296,
+  "skipped_count": 0,
+  "description_count": 1240,
+  "no_description_count": 153,
+  "sha256": "afc52e05a71cc9910500521c624ccc576973287216331dbd2cf4fea98aeeb8c9",
+  "bytes": 668503,
+  "schema_notes": [
+    "Closes the v2 scope deferred from PR #98 (which shipped 18 root-level files).",
+    "Bundle keyed by relative path under specific_skill_stat_descriptions/ - keeps per-skill organization but consumers only need a single file load.",
+    "English-only templates. Each per_skill[rel] is a {descriptions, no_descriptions, source_relpath, ...} dict matching the v1 per-file shape.",
+    "Variant range tokens: '#' = default/any, '1' = exact value 1, '10' = exact 10, '1|#' = [1, inf], '#|0' = [-inf, 0], '1|99' = [1, 99]."
+  ],
+  "data_policy": "Sourced exclusively from the maintainer's licensed PoE2 install via the in-repo extraction pipeline. No third-party wiki / scraped data."
+}

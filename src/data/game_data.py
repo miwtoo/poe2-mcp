@@ -371,6 +371,105 @@ def search_stat_descriptions(
     return results
 
 
+# ---------------------------------------------------------------------------
+# Per-skill stat_descriptions (PR #129 dataset — deferred-from-#98 v2 scope)
+# ---------------------------------------------------------------------------
+
+PER_SKILL_STAT_DESCRIPTIONS = STAT_DESCRIPTIONS_DIR / "per_skill_stat_descriptions.json"
+
+# Cached bundle so per-call lookups don't re-read the 668 KB file.
+_PER_SKILL_CACHE: Optional[Dict[str, Any]] = None
+
+
+def load_per_skill_stat_descriptions() -> Optional[Dict[str, Any]]:
+    """Load data/game/stat_descriptions/per_skill_stat_descriptions.json.
+
+    Returns the parsed bundle (keyed by relative source path under
+    specific_skill_stat_descriptions/) or None if the file isn't shipped
+    in this checkout. Cached after first read.
+    """
+    global _PER_SKILL_CACHE
+    if _PER_SKILL_CACHE is not None:
+        return _PER_SKILL_CACHE
+    if not PER_SKILL_STAT_DESCRIPTIONS.exists():
+        return None
+    try:
+        with open(PER_SKILL_STAT_DESCRIPTIONS, "r", encoding="utf-8") as f:
+            _PER_SKILL_CACHE = json.load(f)
+        return _PER_SKILL_CACHE
+    except Exception as e:
+        logger.warning(f"Failed to load per_skill_stat_descriptions.json: {e}")
+        return None
+
+
+def find_per_skill_stat_description(stat_id: str) -> Optional[Dict[str, Any]]:
+    """Look up a stat_id across all per-skill .csd descriptions.
+
+    Returns the matching record (with primary_template, variants, etc.)
+    tagged with `source_skill` (the relative path key, e.g.
+    'ball_lightning' or 'ancestral_cry/statset_1') so callers can show
+    provenance. None if not found or the dataset isn't shipped.
+    """
+    target = stat_id.strip()
+    if not target:
+        return None
+    bundle = load_per_skill_stat_descriptions()
+    if not bundle:
+        return None
+    for rel_key, file_payload in (bundle.get("per_skill") or {}).items():
+        for record in file_payload.get("descriptions") or []:
+            if target in (record.get("stat_ids") or []):
+                out = dict(record)
+                out["source_skill"] = file_payload.get("skill_key", rel_key)
+                out["source_csd"] = (
+                    "specific_skill_stat_descriptions/" + rel_key
+                )
+                return out
+    return None
+
+
+def search_per_skill_stat_descriptions(
+    query: str,
+    limit: int = 20,
+    fields: tuple = ("stat_id", "template"),
+) -> list:
+    """Substring search across per-skill stat_descriptions.
+
+    Mirrors search_stat_descriptions but against the per-skill bundle.
+    Each result is tagged with `source_skill` and `match_field`.
+    """
+    target = query.lower().strip()
+    if not target:
+        return []
+    bundle = load_per_skill_stat_descriptions()
+    if not bundle:
+        return []
+    results: list = []
+    for rel_key, file_payload in (bundle.get("per_skill") or {}).items():
+        for record in file_payload.get("descriptions") or []:
+            match_field = None
+            if "stat_id" in fields:
+                for sid in record.get("stat_ids") or []:
+                    if target in sid.lower():
+                        match_field = "stat_id"
+                        break
+            if not match_field and "template" in fields:
+                primary = record.get("primary_template") or ""
+                if target in primary.lower():
+                    match_field = "template"
+            if match_field:
+                out = dict(record)
+                out["source_skill"] = file_payload.get("skill_key", rel_key)
+                out["source_csd"] = (
+                    "specific_skill_stat_descriptions/" + rel_key
+                )
+                out["match_field"] = match_field
+                results.append(out)
+                if len(results) >= limit:
+                    return results
+    return results
+
+
 def load_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
     """Load `metadata.json` from a dataset directory."""
     meta = dataset_dir / "metadata.json"
