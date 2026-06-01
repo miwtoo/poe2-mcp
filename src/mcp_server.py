@@ -3470,10 +3470,66 @@ Consider:
                 if results:
                     support_data = results[0]
 
+            # --- Tier 2 fallback: skill_gems.json (gem_type='Support') ---
+            # PR #94 wired inspect_spell_gem similarly. Some support gems (e.g.
+            # Wildfire) only exist in the PoB2-sourced skill_gems dataset and
+            # not in the .datc64-extracted support_gems table. Translate the
+            # skill_gems schema into the legacy shape this handler's formatter
+            # already understands.
+            tier2_source_note = None
+            if not support_data:
+                new_dataset_file = Path(__file__).parent.parent / 'data' / 'game' / 'skill_gems' / 'skill_gems.json'
+                if new_dataset_file.exists():
+                    with open(new_dataset_file, 'r', encoding='utf-8') as f:
+                        new_data = json.load(f)
+                    needle = support_name.lower()
+                    for gem in new_data.get('skill_gems', []):
+                        if gem.get('gem_type') != 'Support':
+                            continue
+                        name = (gem.get('name') or '').lower()
+                        gid = (gem.get('gem_id') or '').lower()
+                        vid = (gem.get('variant_id') or '').lower()
+                        if needle == name or needle == vid or needle in gid or needle in name:
+                            r = gem.get('requirements') or {}
+                            support_data = {
+                                'name': gem.get('name'),
+                                'tags': gem.get('tags') or [],
+                                'tier': gem.get('tier'),
+                                'requirements': {
+                                    'str': r.get('str', 0),
+                                    'dex': r.get('dex', 0),
+                                    'int': r.get('int', 0),
+                                },
+                                # spirit_cost / cost_multiplier / effects /
+                                # compatible_with / restrictions /
+                                # incompatible_with are NOT in the v1
+                                # skill_gems schema — leave unset so the
+                                # formatter just skips them.
+                                'notes': (
+                                    f"Tier-2 fallback record from "
+                                    f"data/game/skill_gems/ (gem_type='Support'). "
+                                    f"Some support-gem fields (spirit_cost, "
+                                    f"effects, compatibility) are NOT extracted "
+                                    f"in skill_gems v1 — query the .datc64 "
+                                    f"support_gems dataset directly for those "
+                                    f"if the gem is also present there."
+                                ),
+                            }
+                            tier2_source_note = (
+                                "**Data Source**: data/game/skill_gems/skill_gems.json "
+                                "(Tier-2 fallback — gem not in data/game/support_gems/; "
+                                "see notes field for v1 schema gaps).\n"
+                            )
+                            break
+
             if not support_data:
                 return [types.TextContent(
                     type="text",
-                    text=f"Support gem '{support_name}' not found in database"
+                    text=(
+                        f"Support gem '{support_name}' not found in "
+                        f"data/game/support_gems/ (.datc64 extract) or "
+                        f"data/game/skill_gems/ (PoB2 gem_type='Support')."
+                    )
                 )]
 
             # Format response
@@ -3545,6 +3601,10 @@ Consider:
             notes = support_data.get('notes')
             if notes:
                 response += f"\n**Notes**: {notes}\n"
+
+            # Tier 2 provenance line (only set when we fell back to skill_gems)
+            if tier2_source_note:
+                response += f"\n{tier2_source_note}"
 
             return [types.TextContent(type="text", text=response)]
 
