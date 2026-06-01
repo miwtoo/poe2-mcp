@@ -354,6 +354,8 @@ class PoE2BuildOptimizerMCP:
                 return await self._handle_get_formula(arguments)
             elif name == "explain_mechanic":
                 return await self._handle_explain_mechanic(arguments)
+            elif name == "calculate_character_dps":
+                return await self._handle_calculate_character_dps(arguments)
             elif name == "validate_support_combination":
                 return await self._handle_validate_support_combination(arguments)
             elif name == "validate_build_constraints":
@@ -752,6 +754,105 @@ class PoE2BuildOptimizerMCP:
                                     "or a stat_id (e.g. 'support_ignite_proliferation_radius'), "
                                     "or a substring to search (e.g. 'proliferation'). "
                                     "Omit entirely to see overview + sample suggestions."
+                                )
+                            }
+                        },
+                        "required": []
+                    }
+                ),
+
+                # Server-side DPS calculation (P5)
+                types.Tool(
+                    name="calculate_character_dps",
+                    description=(
+                        "Compute spell DPS server-side using PoE2 formulas. "
+                        "Accepts an aggregated set of modifiers (sum of increased %, "
+                        "list of more multipliers, added flat damage, crit, cast speed, "
+                        "optional enemy resistances) and returns a structured DPS "
+                        "breakdown — base damage, increased/more multipliers, crit "
+                        "expected hit, post-resistance final, casts/sec, DPS. The math "
+                        "lives in src/calculator/spell_dps_calculator.py and is the "
+                        "single source of truth. Use this instead of asking the AI to "
+                        "do the math in its head."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "spell_name": {
+                                "type": "string",
+                                "description": (
+                                    "Spell name (e.g. 'Fireball', 'Arc', 'Spark'). "
+                                    "If not in the built-in database, supply spell_stats."
+                                )
+                            },
+                            "spell_stats": {
+                                "type": "object",
+                                "description": (
+                                    "Override spell base stats. Shape: "
+                                    "{base_damage_min, base_damage_max, "
+                                    "damage_effectiveness, base_crit_chance, "
+                                    "base_cast_time, damage_types (list)}."
+                                )
+                            },
+                            "increased_spell_damage": {
+                                "type": "number",
+                                "description": "Sum of all %increased spell damage (additive). Default 0."
+                            },
+                            "more_multipliers": {
+                                "type": "array",
+                                "items": {"type": "number"},
+                                "description": (
+                                    "List of %more damage multipliers (each applied "
+                                    "multiplicatively). E.g. [25, 30, 20] for three "
+                                    "support gems giving +25/+30/+20%."
+                                )
+                            },
+                            "added_damage": {
+                                "type": "object",
+                                "description": (
+                                    "Flat added damage by type. Shape: "
+                                    "{fire, cold, lightning, chaos, physical}. "
+                                    "All default to 0."
+                                )
+                            },
+                            "increased_cast_speed": {
+                                "type": "number",
+                                "description": "Sum of all %increased cast speed. Default 0."
+                            },
+                            "increased_crit_chance": {
+                                "type": "number",
+                                "description": "Sum of all %increased crit chance. Default 0."
+                            },
+                            "added_crit_bonus": {
+                                "type": "number",
+                                "description": (
+                                    "Crit damage bonus. PoE2 base is 100 (= 2x on crit). "
+                                    "Default 100."
+                                )
+                            },
+                            "increased_crit_damage": {
+                                "type": "number",
+                                "description": "Sum of all %increased crit damage. Default 0."
+                            },
+                            "max_mana": {
+                                "type": "number",
+                                "description": "Maximum mana pool (for Archmage). Default 0."
+                            },
+                            "has_archmage": {
+                                "type": "boolean",
+                                "description": "Whether Archmage support is active. Default false."
+                            },
+                            "enemy": {
+                                "type": "object",
+                                "description": (
+                                    "Enemy defensive stats. Shape: "
+                                    "{fire_resistance, cold_resistance, "
+                                    "lightning_resistance, chaos_resistance, "
+                                    "physical_resistance, fire_exposure, "
+                                    "cold_exposure, lightning_exposure, "
+                                    "fire_penetration, cold_penetration, "
+                                    "lightning_penetration, is_shocked}. "
+                                    "Defaults to a target dummy (all zeros)."
                                 )
                             }
                         },
@@ -3062,6 +3163,163 @@ Consider:
             f"PoE2 0.5). Not hand-authored interpretation.\n"
         )
         return response
+
+    async def _handle_calculate_character_dps(self, args: dict) -> List[types.TextContent]:
+        """Server-side spell DPS calculation. P5 / Issue #114.
+
+        The MCP-as-math-engine principle: the AI passes pre-aggregated modifiers
+        (sum of %increased, list of %more, flat added damage, crit fields,
+        cast speed, optional enemy resistances), the server runs the canonical
+        PoE2 formula in src/calculator/spell_dps_calculator.py, and returns
+        the structured breakdown. No mental math, no AI rounding errors, no
+        forgotten multipliers.
+        """
+        try:
+            try:
+                from .calculator.spell_dps_calculator import (
+                    SpellDPSCalculator, SpellStats, CharacterModifiers, EnemyStats,
+                )
+                from .data.game_data import get_version
+            except ImportError:
+                from src.calculator.spell_dps_calculator import (
+                    SpellDPSCalculator, SpellStats, CharacterModifiers, EnemyStats,
+                )
+                from src.data.game_data import get_version
+
+            calc = SpellDPSCalculator()
+
+            # ---- Resolve spell ----
+            spell_name = (args.get("spell_name") or "").strip()
+            spell_stats_override = args.get("spell_stats") or {}
+
+            if spell_stats_override:
+                spell = SpellStats(
+                    name=spell_stats_override.get("name") or spell_name or "custom",
+                    base_damage_min=float(spell_stats_override.get("base_damage_min", 0)),
+                    base_damage_max=float(spell_stats_override.get("base_damage_max", 0)),
+                    damage_effectiveness=float(spell_stats_override.get("damage_effectiveness", 1.0)),
+                    base_crit_chance=float(spell_stats_override.get("base_crit_chance", 0)),
+                    base_cast_time=float(spell_stats_override.get("base_cast_time", 1.0)),
+                    damage_types=list(spell_stats_override.get("damage_types") or []),
+                )
+                spell_source = "caller-supplied spell_stats"
+            elif spell_name:
+                key = spell_name.lower()
+                if key not in calc.SPELL_DATABASE:
+                    available = ", ".join(sorted(calc.SPELL_DATABASE.keys()))
+                    return [types.TextContent(
+                        type="text",
+                        text=(
+                            f"Spell '{spell_name}' not in the built-in database. "
+                            f"Available: {available}. "
+                            "For other spells, pass `spell_stats` with "
+                            "base_damage_min/max, damage_effectiveness, "
+                            "base_crit_chance, base_cast_time, damage_types."
+                        )
+                    )]
+                spell = calc.SPELL_DATABASE[key]
+                spell_source = f"built-in SPELL_DATABASE[{key!r}]"
+            else:
+                return [types.TextContent(
+                    type="text",
+                    text=(
+                        "Error: provide spell_name (lookup) or spell_stats (custom). "
+                        "Built-in spells: " + ", ".join(sorted(calc.SPELL_DATABASE.keys()))
+                    )
+                )]
+
+            # ---- Build character modifiers ----
+            added = args.get("added_damage") or {}
+            char_mods = CharacterModifiers(
+                increased_spell_damage=float(args.get("increased_spell_damage", 0)),
+                increased_cast_speed=float(args.get("increased_cast_speed", 0)),
+                increased_crit_damage=float(args.get("increased_crit_damage", 0)),
+                more_multipliers=[float(m) for m in (args.get("more_multipliers") or [])],
+                added_fire=float(added.get("fire", 0)),
+                added_cold=float(added.get("cold", 0)),
+                added_lightning=float(added.get("lightning", 0)),
+                added_chaos=float(added.get("chaos", 0)),
+                added_physical=float(added.get("physical", 0)),
+                added_crit_bonus=float(args.get("added_crit_bonus", 100)),
+                increased_crit_chance=float(args.get("increased_crit_chance", 0)),
+                maximum_mana=float(args.get("max_mana", 0)),
+                has_archmage=bool(args.get("has_archmage", False)),
+            )
+
+            # ---- Build enemy stats ----
+            enemy_in = args.get("enemy") or {}
+            enemy = EnemyStats(
+                fire_resistance=float(enemy_in.get("fire_resistance", 0)),
+                cold_resistance=float(enemy_in.get("cold_resistance", 0)),
+                lightning_resistance=float(enemy_in.get("lightning_resistance", 0)),
+                chaos_resistance=float(enemy_in.get("chaos_resistance", 0)),
+                physical_resistance=float(enemy_in.get("physical_resistance", 0)),
+                fire_exposure=float(enemy_in.get("fire_exposure", 0)),
+                cold_exposure=float(enemy_in.get("cold_exposure", 0)),
+                lightning_exposure=float(enemy_in.get("lightning_exposure", 0)),
+                fire_penetration=float(enemy_in.get("fire_penetration", 0)),
+                cold_penetration=float(enemy_in.get("cold_penetration", 0)),
+                lightning_penetration=float(enemy_in.get("lightning_penetration", 0)),
+                is_shocked=bool(enemy_in.get("is_shocked", False)),
+            )
+
+            # ---- Run the math ----
+            result = calc.calculate_dps(spell, char_mods, enemy)
+
+            # ---- Format response ----
+            v = get_version() or {}
+            lines = []
+            lines.append(f"# {spell.name} DPS")
+            lines.append("")
+            lines.append(f"- **Total DPS**: {result.get('total_dps', 0)}")
+            lines.append(f"- **Average hit**: {result.get('average_hit', 0)}")
+            lines.append(f"- **Casts/sec**: {result.get('casts_per_second', 0)}")
+            lines.append(f"- **Crit chance**: {result.get('crit_chance', 0)}%")
+            lines.append("")
+
+            breakdown = result.get("breakdown") or {}
+            if breakdown:
+                lines.append("## Breakdown")
+                lines.append(f"- Base damage: {breakdown.get('base_damage', 0)}")
+                lines.append(f"- Added damage: {breakdown.get('added_damage', 0)}")
+                lines.append(f"- After increased: {breakdown.get('after_increased', 0)}")
+                lines.append(f"- After more: {breakdown.get('after_more', 0)}")
+                lines.append(f"- Expected hit (crit-weighted): {breakdown.get('expected_hit', 0)}")
+                lines.append(f"- After resistance: {breakdown.get('after_resistance', 0)}")
+                mults = breakdown.get("multipliers") or {}
+                if mults:
+                    lines.append("")
+                    lines.append("**Multipliers applied:**")
+                    lines.append(f"- Increased: ×{mults.get('increased', 1.0)}")
+                    lines.append(f"- More (multiplicative): ×{mults.get('more', 1.0)}")
+                    lines.append(f"- Crit: ×{mults.get('crit', 1.0)}")
+                lines.append("")
+
+            if result.get("error"):
+                lines.append(f"⚠️  **Calculator error**: {result['error']}")
+                lines.append("")
+
+            lines.append("---")
+            lines.append(
+                f"**Source**: {spell_source} → "
+                f"`src/calculator/spell_dps_calculator.py::SpellDPSCalculator.calculate_dps`. "
+                f"Math is canonical (PoE2 formula); spell base stats from the built-in "
+                f"database are CURRENT-AS-OF-AUTHORING — verify against patch notes if "
+                f"results look off."
+            )
+            if v:
+                lines.append(
+                    f"**Data version**: {v.get('released_as', '?')} "
+                    f"(extracted {v.get('extracted_at', '?')})"
+                )
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        except Exception as e:
+            logger.error(f"calculate_character_dps error: {e}", exc_info=True)
+            return [types.TextContent(
+                type="text",
+                text=f"Error in calculate_character_dps: {e}"
+            )]
 
     async def _handle_get_formula(self, args: dict) -> List[types.TextContent]:
         """Get a PoE2 calculation formula for Claude to use"""
