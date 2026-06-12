@@ -137,19 +137,11 @@ class CharacterFetcher:
         """
         logger.info(f"Fetching character {character_name} for account {account_name} (league: {league})")
 
-        # Try poe.ninja API first (most reliable)
-        try:
-            logger.debug(f"  Trying poe.ninja API with league={league}")
-            char_data = await self.ninja_api.get_character(account_name, character_name, league)
-            if char_data and char_data.get("level", 0) > 0:
-                logger.info(f"✅ Successfully fetched from poe.ninja API")
-                self.last_error_message = ""  # Clear error on success
-                return char_data
-        except Exception as e:
-            self.last_error_message = f"poe.ninja API error: {str(e)}"
-            logger.warning(f"⚠️ {self.last_error_message}")
+        # NOTE (#133): the former tier 1 (PoeNinjaAPI.get_character — snapshot
+        # endpoint + HTML scrape) is retired; both its endpoints are dead
+        # post-0.5. The profile-API flow below is now the primary path.
 
-        # Fallback to poe.ninja SSE/model API
+        # poe.ninja profile API (SSE events -> model) — the working 0.5 path
         try:
             char_data = await self.get_character_from_poe_ninja(account_name, character_name, league)
             if char_data and char_data.get("level", 0) > 0:

@@ -215,667 +215,135 @@ class PoeNinjaAPI:
 
     async def get_character(self, account: str, character: str, league: str = "Runes of Aldur") -> Optional[Dict[str, Any]]:
         """
-        Fetch character from poe.ninja using their hidden API
+        RETIRED (#133) — always returns None.
 
-        Args:
-            account: Path of Exile account name
-            character: Character name
-            league: League name (default: "Runes of Aldur")
+        This method used the pre-0.5 snapshot endpoint
+        (``/poe2/api/builds/{version}/character``), which is dead post-0.5
+        (404 for any character not in a specific snapshot), with an HTML
+        scrape fallback that is equally dead (Astro SPA shells carry no
+        embedded data). Both code paths were removed.
 
-        Returns:
-            Character data dictionary or None if not found
+        The working per-character fetch is the no-auth profile API flow in
+        ``CharacterFetcher.get_character`` (events SSE → model — see #131).
+        Use ``list_account_characters`` here for account-level enumeration.
         """
-        cache_key = f"ninja_character_{account}_{character}_{league}"
+        logger.debug(
+            f"PoeNinjaAPI.get_character({account}/{character}) is retired (#133) — "
+            f"use CharacterFetcher.get_character (profile API flow)"
+        )
+        return None
 
-        # Check cache first
+    # ------------------------------------------------------------------
+    # Profile API (post-0.5, no auth) — account enumeration + char model.
+    # Endpoint map from the 2026-06-02 HAR analysis (#133/#134):
+    #   GET /poe2/api/events/characters/{account}            -> SSE {"version": N}
+    #   GET /poe2/api/profile/characters/{account}/{N}       -> JSON char list
+    #   GET /poe2/api/events/character/{acct}/{slug}/{char}  -> SSE {"version": M}
+    #   GET /poe2/api/profile/characters/{acct}/{slug}/{char}/model/{M}
+    #                                                        -> {type, charModel}
+    # ------------------------------------------------------------------
+
+    async def _read_sse_version(self, url: str) -> Optional[int]:
+        """Read the first ``data: {"version": N}`` message from an SSE URL."""
+        await self.rate_limiter.acquire()
+        try:
+            async with self.client.stream('GET', url) as response:
+                if response.status_code != 200:
+                    logger.warning(f"SSE endpoint returned {response.status_code}: {url}")
+                    return None
+                async for line in response.aiter_lines():
+                    if line.startswith('data:'):
+                        try:
+                            return json.loads(line[5:].strip()).get('version')
+                        except (json.JSONDecodeError, AttributeError):
+                            continue
+        except Exception as e:
+            logger.warning(f"SSE read failed for {url}: {e}")
+        return None
+
+    async def list_account_characters(self, account: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Enumerate ALL characters on an account's public poe.ninja profile.
+
+        Two-step profile-API flow: account SSE for the list version, then
+        the character-list endpoint. Each item carries name, level, league,
+        ``leagueUrl`` (the slug the model endpoint needs), ``className``,
+        ``isCurrent``, ``updated``, and a skills summary.
+
+        Returns the list, or None when the account is private/unknown or
+        the endpoint shape changed.
+        """
+        cache_key = f"ninja_char_list_{account}"
         if self.cache_manager:
             cached = await self.cache_manager.get(cache_key)
             if cached:
-                logger.info(f"✅ Cache hit for character {character} ({league})")
                 return cached
 
-        try:
-            # Rate limit
-            await self.rate_limiter.acquire()
-
-            logger.info(f"🔍 Fetching character: {character} (Account: {account}, League: {league})")
-
-            # Use the discovered hidden API endpoint
-            char_data = await self._fetch_character_from_api(account, character, league)
-
-            if char_data and self.cache_manager:
-                await self.cache_manager.set(cache_key, char_data, ttl=3600)
-                logger.info(f"✅ Successfully fetched and cached character {character}")
-
-            return char_data
-
-        except Exception as e:
-            logger.error(f"❌ Error fetching character from poe.ninja: {e}", exc_info=True)
+        version = await self._read_sse_version(
+            f"{self.base_url}/poe2/api/events/characters/{account}"
+        )
+        if version is None:
+            logger.warning(f"No list version from account events SSE for {account}")
             return None
 
-    async def _get_index_state(self) -> Optional[Dict[str, Any]]:
-        """
-        Fetch the index state which contains snapshot versions for all leagues
-
-        Returns:
-            Index state with snapshot versions or None if failed
-        """
+        await self.rate_limiter.acquire()
         try:
-            url = f"{self.base_url}/poe2/api/data/index-state"
-            logger.debug(f"Fetching index state from: {url}")
-
+            url = f"{self.base_url}/poe2/api/profile/characters/{account}/{version}"
             response = await self.client.get(url)
-
-            if response.status_code == 200:
-                data = response.json()
-                logger.debug(f"✅ Got index state with {len(data.get('snapshotVersions', []))} snapshot versions")
-                return data
-            else:
-                logger.warning(f"⚠️ Index state returned {response.status_code}")
+            if response.status_code != 200:
+                logger.warning(f"Character list returned {response.status_code} for {account}")
                 return None
-
-        except Exception as e:
-            logger.error(f"❌ Failed to fetch index state: {e}")
-            return None
-
-    async def _fetch_character_from_api(self, account: str, character: str, league: str) -> Optional[Dict[str, Any]]:
-        """
-        Fetch character using the discovered hidden API
-
-        API Endpoint: /poe2/api/builds/{version}/character
-        Parameters: account, name, overview
-
-        Args:
-            account: Account name
-            character: Character name
-            league: League name
-
-        Returns:
-            Character data dictionary or None if not found
-        """
-        try:
-            # Step 1: Get index state to find the snapshot version for this league
-            index_state = await self._get_index_state()
-            if not index_state:
-                logger.warning("⚠️ Could not get index state, falling back to HTML scraping")
-                return await self._scrape_character_page(account, character, league)
-
-            # Step 2: Find the snapshot version for our league
-            league_slug = self._get_league_slug(league)
-            snapshot = None
-            snapshots = index_state.get("snapshotVersions", [])
-
-            # Primary: match by slug (works when LEAGUE_MAPPINGS is current)
-            for snap in snapshots:
-                if snap.get("url") == league_slug:
-                    snapshot = snap
-                    break
-
-            # Auto-discovery fallback: match by league NAME (case-insensitive) against
-            # snap.name. Lets new leagues work before LEAGUE_MAPPINGS is updated for
-            # the next patch, so we don't break on the next league launch.
-            if not snapshot:
-                normalized = league.lower().strip()
-                for snap in snapshots:
-                    if snap.get("name", "").lower().strip() == normalized:
-                        snapshot = snap
-                        logger.info(
-                            f"📡 Auto-discovered slug '{snap.get('url')}' for league "
-                            f"'{league}' via index-state name match "
-                            f"(LEAGUE_MAPPINGS may be stale — consider adding)"
-                        )
-                        break
-
-            if not snapshot:
-                logger.warning(f"⚠️ No snapshot found for league '{league}' (slug: '{league_slug}')")
-                logger.warning(f"   Available leagues: {[s.get('url') for s in snapshots]}")
-                return await self._scrape_character_page(account, character, league)
-
-            version = snapshot.get("version")
-            overview = snapshot.get("snapshotName")
-
-            logger.info(f"📡 Using snapshot version: {version}, overview: {overview}")
-
-            # Step 3: Call the character API
-            url = f"{self.base_url}/poe2/api/builds/{version}/character"
-            params = {
-                "account": account,
-                "name": character,
-                "overview": overview
-            }
-
-            logger.debug(f"Calling API: {url}")
-            logger.debug(f"Parameters: {params}")
-
-            response = await self.client.get(url, params=params)
-
-            if response.status_code == 200:
-                data = response.json()
-                logger.info(f"✅ Successfully fetched character from API")
-                logger.debug(f"   Character: {data.get('name')}, Level: {data.get('level', 'Unknown')}, Class: {data.get('class', 'Unknown')}")
-                return self._normalize_api_character_data(data)
-
-            elif response.status_code == 404:
-                logger.warning(f"⚠️ Character not found (404)")
+            characters = response.json()
+            if not isinstance(characters, list):
+                logger.warning(f"Unexpected character-list shape for {account}: {type(characters).__name__}")
                 return None
-
-            else:
-                logger.warning(f"⚠️ API returned {response.status_code}")
-                logger.debug(f"   Response: {response.text[:200]}")
-                return await self._scrape_character_page(account, character, league)
-
+            if self.cache_manager:
+                await self.cache_manager.set(cache_key, characters, ttl=600)
+            logger.info(f"Enumerated {len(characters)} characters for account {account}")
+            return characters
         except Exception as e:
-            logger.error(f"❌ API fetch failed: {e}", exc_info=True)
-            logger.info("   Falling back to HTML scraping")
-            return await self._scrape_character_page(account, character, league)
-
-    def _normalize_api_character_data(self, api_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Normalize character data from the API to match our expected format
-
-        Args:
-            api_data: Raw data from poe.ninja API
-
-        Returns:
-            Normalized character data with all stats
-        """
-        defensive_stats = api_data.get("defensiveStats", {})
-
-        # Log what we're receiving for debugging
-        logger.debug(f"🔍 Normalizing API data - defensiveStats: {len(defensive_stats)} fields")
-        logger.debug(f"   Life: {defensive_stats.get('life')}, ES: {defensive_stats.get('energyShield')}, EHP: {defensive_stats.get('effectiveHealthPool')}")
-        logger.debug(f"   Resistances - Fire: {defensive_stats.get('fireResistance')}, Cold: {defensive_stats.get('coldResistance')}, Lightning: {defensive_stats.get('lightningResistance')}")
-
-        # Map all defensive stats
-        stats_dict = {
-            # Core defenses (both snake_case and camelCase for compatibility)
-            "life": defensive_stats.get("life", 0),
-            "energy_shield": defensive_stats.get("energyShield", 0),
-            "energyShield": defensive_stats.get("energyShield", 0),
-            "mana": defensive_stats.get("mana", 0),
-            "spirit": defensive_stats.get("spirit", 0),
-            "evasion": defensive_stats.get("evasionRating", 0),
-            "evasionRating": defensive_stats.get("evasionRating", 0),
-            "armor": defensive_stats.get("armour", 0),
-            "armour": defensive_stats.get("armour", 0),
-
-            # Attributes
-            "strength": defensive_stats.get("strength", 0),
-            "dexterity": defensive_stats.get("dexterity", 0),
-            "intelligence": defensive_stats.get("intelligence", 0),
-
-            # Resistances (both snake_case and camelCase for compatibility)
-            "fire_res": defensive_stats.get("fireResistance", 0),
-            "cold_res": defensive_stats.get("coldResistance", 0),
-            "lightning_res": defensive_stats.get("lightningResistance", 0),
-            "chaos_res": defensive_stats.get("chaosResistance", 0),
-            "fireResistance": defensive_stats.get("fireResistance", 0),
-            "coldResistance": defensive_stats.get("coldResistance", 0),
-            "lightningResistance": defensive_stats.get("lightningResistance", 0),
-            "chaosResistance": defensive_stats.get("chaosResistance", 0),
-            "fire_res_overcap": defensive_stats.get("fireResistanceOverCap", 0),
-            "cold_res_overcap": defensive_stats.get("coldResistanceOverCap", 0),
-            "lightning_res_overcap": defensive_stats.get("lightningResistanceOverCap", 0),
-            "chaos_res_overcap": defensive_stats.get("chaosResistanceOverCap", 0),
-
-            # EHP and Maximum Hit Taken
-            "effective_health_pool": defensive_stats.get("effectiveHealthPool", 0),
-            "physical_max_hit": defensive_stats.get("physicalMaximumHitTaken", 0),
-            "fire_max_hit": defensive_stats.get("fireMaximumHitTaken", 0),
-            "cold_max_hit": defensive_stats.get("coldMaximumHitTaken", 0),
-            "lightning_max_hit": defensive_stats.get("lightningMaximumHitTaken", 0),
-            "chaos_max_hit": defensive_stats.get("chaosMaximumHitTaken", 0),
-            "lowest_max_hit": defensive_stats.get("lowestMaximumHitTaken", 0),
-
-            # Charges
-            "endurance_charges": defensive_stats.get("enduranceCharges", 0),
-            "frenzy_charges": defensive_stats.get("frenzyCharges", 0),
-            "power_charges": defensive_stats.get("powerCharges", 0),
-
-            # Avoidance & Mitigation
-            "block_chance": defensive_stats.get("blockChance", 0),
-            "spell_block_chance": defensive_stats.get("spellBlockChance", 0),
-            "spell_suppression": defensive_stats.get("spellSuppressionChance", 0),
-            # NOTE: spell_dodge removed - PoE2 uses evasion for all hits, not dodge
-
-            # Other stats
-            "movement_speed": defensive_stats.get("movementSpeed", 0),
-            "item_rarity": defensive_stats.get("itemRarity", 0),
-
-            # Physical damage conversion
-            "physical_taken_as": defensive_stats.get("physicalTakenAs", {
-                "physical": 100, "fire": 0, "cold": 0, "lightning": 0, "chaos": 0
-            }),
-        }
-
-        # Extract skill DPS data
-        skill_dps = []
-        for skill in api_data.get("skills", []):
-            for dps_entry in skill.get("dps", []):
-                damage_types = dps_entry.get("damageTypes", [0, 0, 0, 0, 0])
-                skill_dps.append({
-                    "skill_name": dps_entry.get("name", "Unknown"),
-                    "total_dps": dps_entry.get("dps", 0),
-                    "dot_dps": dps_entry.get("dotDps", 0),
-                    "damage_types": damage_types,
-                    "damage_breakdown": {
-                        "physical": damage_types[0] if len(damage_types) > 0 else 0,
-                        "fire": damage_types[1] if len(damage_types) > 1 else 0,
-                        "cold": damage_types[2] if len(damage_types) > 2 else 0,
-                        "lightning": damage_types[3] if len(damage_types) > 3 else 0,
-                        "chaos": damage_types[4] if len(damage_types) > 4 else 0,
-                    }
-                })
-
-        # Separate charms from flasks (poe.ninja puts both in "flasks" array)
-        # Charms have "Charm" in their baseType
-        raw_flasks = api_data.get("flasks", [])
-        actual_flasks = []
-        actual_charms = []
-        for item in raw_flasks:
-            base_type = item.get("itemData", {}).get("baseType", "")
-            if "Charm" in base_type:
-                actual_charms.append(item)
-            else:
-                actual_flasks.append(item)
-
-        # Build normalized data structure
-        # Detect ascendancy from class field
-        raw_class = api_data.get("class", "Unknown")
-        if raw_class in ASCENDANCY_TO_BASE_CLASS:
-            base_class = ASCENDANCY_TO_BASE_CLASS[raw_class]
-            ascendancy = raw_class
-        elif raw_class in BASE_CLASSES:
-            base_class = raw_class
-            ascendancy = None
-        else:
-            # Unknown class - keep as-is
-            base_class = raw_class
-            ascendancy = None
-
-        normalized = {
-            "name": api_data.get("name", "Unknown"),
-            "account": api_data.get("account", "Unknown"),
-            "class": base_class,
-            "ascendancy": ascendancy,
-            "level": api_data.get("level", 0),
-            "league": api_data.get("league", "Unknown"),
-
-            # Items with details
-            # Use inventoryId from itemData for string slot names (Helm, Gloves, etc.)
-            # Falls back to numeric itemSlot if inventoryId is missing
-            "items": [
-                {
-                    "slot": item.get("itemData", {}).get("inventoryId", f"Slot{item.get('itemSlot', 0)}"),
-                    "name": item.get("itemData", {}).get("name", ""),
-                    "type_line": item.get("itemData", {}).get("typeLine", ""),
-                    "base_type": item.get("itemData", {}).get("baseType", ""),
-                    "item_level": item.get("itemData", {}).get("ilvl", 0),
-                    "rarity": item.get("itemData", {}).get("frameType", 0),
-                    "corrupted": item.get("itemData", {}).get("corrupted", False),
-                    "icon": item.get("itemData", {}).get("icon", ""),
-                    "mods": {
-                        "implicit": item.get("itemData", {}).get("implicitMods", []),
-                        "explicit": item.get("itemData", {}).get("explicitMods", []),
-                        "crafted": item.get("itemData", {}).get("craftedMods", []),
-                        "enchant": item.get("itemData", {}).get("enchantMods", [])
-                    }
-                }
-                for item in api_data.get("items", [])
-            ],
-
-            # Skills (raw)
-            "skills": api_data.get("skills", []),
-
-            # Skill DPS (normalized)
-            "skill_dps": skill_dps,
-
-            # Passives
-            "passives": api_data.get("passiveSelection", []),
-            "passive_set_1": api_data.get("passiveSelectionSet1", []),
-            "passive_set_2": api_data.get("passiveSelectionSet2", []),
-
-            # Keystones
-            "keystones": [
-                {
-                    "name": keystone.get("name", "Unknown"),
-                    "icon": keystone.get("icon", ""),
-                    "stats": keystone.get("stats", [])
-                }
-                for keystone in api_data.get("keystones", [])
-            ],
-
-            # Flasks (actual flasks only, charms are separated)
-            "flasks": [
-                {
-                    "name": flask.get("itemData", {}).get("typeLine", "Unknown Flask"),
-                    "base_type": flask.get("itemData", {}).get("baseType", ""),
-                    "item_level": flask.get("itemData", {}).get("ilvl", 0),
-                    "mods": flask.get("itemData", {}).get("explicitMods", []),
-                    "icon": flask.get("itemData", {}).get("icon", "")
-                }
-                for flask in actual_flasks
-            ],
-
-            # Jewels
-            "jewels": [
-                {
-                    "name": jewel.get("itemData", {}).get("name") or jewel.get("itemData", {}).get("typeLine", "Unknown Jewel"),
-                    "base_type": jewel.get("itemData", {}).get("baseType", ""),
-                    "item_level": jewel.get("itemData", {}).get("ilvl", 0),
-                    "mods": jewel.get("itemData", {}).get("explicitMods", []),
-                    "icon": jewel.get("itemData", {}).get("icon", ""),
-                    "position": {
-                        "x": jewel.get("itemData", {}).get("x", 0),
-                        "y": jewel.get("itemData", {}).get("y", 0)
-                    }
-                }
-                for jewel in api_data.get("jewels", [])
-            ],
-
-            # Charms (PoE2 new item type - triggered effects, extracted from flasks array)
-            "charms": [
-                {
-                    "name": charm.get("itemData", {}).get("name") or charm.get("itemData", {}).get("typeLine", "Unknown Charm"),
-                    "type_line": charm.get("itemData", {}).get("typeLine", ""),
-                    "base_type": charm.get("itemData", {}).get("baseType", ""),
-                    "item_level": charm.get("itemData", {}).get("ilvl", 0),
-                    "rarity": charm.get("itemData", {}).get("frameType", 0),
-                    "corrupted": charm.get("itemData", {}).get("corrupted", False),
-                    "mods": {
-                        "implicit": charm.get("itemData", {}).get("implicitMods", []),
-                        "explicit": charm.get("itemData", {}).get("explicitMods", []),
-                        "utility": charm.get("itemData", {}).get("utilityMods", []),
-                    },
-                    "icon": charm.get("itemData", {}).get("icon", "")
-                }
-                for charm in actual_charms
-            ],
-
-            # Path of Building export
-            "pob_export": api_data.get("pathOfBuildingExport", ""),
-
-            # Stats (nested format)
-            "stats": stats_dict,
-
-            # Metadata
-            "source": "poe.ninja API",
-            "fetched_at": datetime.utcnow().isoformat(),
-            "weapon_swap_active": api_data.get("useSecondWeaponSet", False)
-        }
-
-        # ALSO add stats at top level for tools that expect them there
-        normalized.update(stats_dict)
-
-        logger.info(f"✅ Normalized character data:")
-        logger.info(f"   Defenses - Life: {stats_dict.get('life')}, ES: {stats_dict.get('energy_shield')}, EHP: {stats_dict.get('effective_health_pool')}")
-        logger.info(f"   Skills with DPS: {len(skill_dps)}")
-        logger.info(f"   Keystones: {len(normalized['keystones'])}")
-        logger.info(f"   Items: {len(normalized['items'])}, Flasks: {len(normalized['flasks'])}, Jewels: {len(normalized['jewels'])}, Charms: {len(normalized['charms'])}")
-
-        return normalized
-
-    async def _scrape_character_page(self, account: str, character: str, league: str = "Runes of Aldur") -> Optional[Dict[str, Any]]:
-        """
-        Scrape character data from poe.ninja profile page
-
-        Args:
-            account: Account name
-            character: Character name
-            league: League name (default: "Runes of Aldur")
-
-        Returns:
-            Parsed character data
-        """
-        try:
-            # Convert league to URL slug (e.g., "Abyss" -> "abyss")
-            league_slug = self._get_league_slug(league)
-
-            # CRITICAL FIX: Based on HAR file analysis, the correct URL format includes league
-            # Format: https://poe.ninja/poe2/builds/{league}/character/{account}/{character}
-            urls = [
-                f"{self.base_url}/poe2/builds/{league_slug}/character/{account}/{character}",
-                f"{self.base_url}/builds/{league_slug}/character/{account}/{character}",  # Fallback without poe2
-            ]
-
-            logger.info(f"📡 Attempting to fetch from poe.ninja with league '{league}' (slug: '{league_slug}')")
-
-            for i, url in enumerate(urls, 1):
-                try:
-                    logger.debug(f"  [{i}/{len(urls)}] Trying URL: {url}")
-                    response = await self.client.get(url)
-
-                    logger.debug(f"  [{i}/{len(urls)}] Response: {response.status_code}")
-
-                    if response.status_code == 200:
-                        logger.info(f"✅ Successfully fetched from: {url}")
-                        return await self._parse_character_html(response.text, account, character)
-                    else:
-                        logger.debug(f"  [{i}/{len(urls)}] Non-200 status: {response.status_code}")
-
-                except Exception as e:
-                    logger.debug(f"  [{i}/{len(urls)}] Exception: {e}")
-                    continue
-
-            logger.warning(f"❌ Could not fetch character {character} from any poe.ninja URL")
-            logger.warning(f"   Tried {len(urls)} URLs with league slug '{league_slug}'")
+            logger.error(f"Character-list fetch failed for {account}: {e}")
             return None
 
-        except Exception as e:
-            logger.error(f"❌ Character scraping error: {e}", exc_info=True)
+    async def resolve_character_league(self, account: str, character: str) -> Optional[str]:
+        """
+        Resolve a character's league slug (``leagueUrl``) via enumeration —
+        answers "which league is this character in" without guessing, which
+        the model endpoint needs as a path segment.
+        """
+        characters = await self.list_account_characters(account)
+        if not characters:
             return None
+        wanted = character.lower().strip()
+        for entry in characters:
+            if str(entry.get('name', '')).lower() == wanted:
+                return entry.get('leagueUrl')
+        logger.warning(f"Character {character} not in {account}'s profile list")
+        return None
 
-    async def _parse_character_html(self, html: str, account: str, character: str) -> Optional[Dict[str, Any]]:
-        """
-        Parse character data from HTML page
-
-        Args:
-            html: HTML content
-            account: Account name
-            character: Character name
-
-        Returns:
-            Parsed character data, or None when the response is recognizably
-            a post-0.5 Astro SPA shell with no embedded build data
-            (Issue #61). In that case we log a clear SPA-detection warning
-            so the multi-tier scraper fallback can distinguish "real
-            character-not-found" from "poe.ninja's data path is dead."
-        """
-        # Early detection of the SPA-migration failure mode (#61). Returning
-        # None here is the same as the previous behavior, but the explicit
-        # log line makes the failure surface obvious to anyone reading the
-        # logs instead of "parse failed for unknown reasons."
+    async def _fetch_char_model(
+        self, account: str, league_url: str, character: str
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch the raw ``{type, charModel}`` blob via the profile API."""
+        version = await self._read_sse_version(
+            f"{self.base_url}/poe2/api/events/character/{account}/{league_url}/{character}"
+        )
+        if version is None:
+            return None
+        await self.rate_limiter.acquire()
         try:
-            try:
-                from .poe_ninja_spa_detect import is_astro_spa_shell
-            except ImportError:
-                from src.api.poe_ninja_spa_detect import is_astro_spa_shell
-            if is_astro_spa_shell(html):
-                logger.warning(
-                    "poe.ninja returned an Astro SPA shell with no embedded "
-                    "build data for %s/%s. This is the Issue #61 failure "
-                    "mode (Patch 0.5 SPA migration). Per-character JSON API "
-                    "may still work for characters in the current snapshot.",
-                    account, character,
-                )
+            url = (
+                f"{self.base_url}/poe2/api/profile/characters/"
+                f"{account}/{league_url}/{character}/model/{version}"
+            )
+            response = await self.client.get(url)
+            if response.status_code != 200:
+                logger.warning(f"Model endpoint returned {response.status_code} for {character}")
                 return None
-        except Exception:
-            # Detection must never block parsing - fall through to the
-            # legacy parser on any helper error.
-            pass
-
-        try:
-            logger.debug(f"📄 Parsing HTML (length: {len(html)} chars)")
-            soup = BeautifulSoup(html, 'html.parser')
-
-            # Look for embedded JSON data in script tags
-            scripts = soup.find_all('script')
-            logger.debug(f"🔎 Found {len(scripts)} script tags in HTML")
-
-            for i, script in enumerate(scripts, 1):
-                if script.string and ('window.__NUXT__' in script.string or 'window.__data' in script.string):
-                    try:
-                        # Extract JSON data
-                        script_content = script.string
-
-                        # Try NUXT data first
-                        if 'window.__NUXT__' in script_content:
-                            logger.debug(f"  [Script {i}] Found window.__NUXT__ data")
-                            json_start = script_content.find('window.__NUXT__=') + len('window.__NUXT__=')
-                            json_end = script_content.find('</script>', json_start)
-                            json_str = script_content[json_start:json_end].strip()
-                            if json_str.endswith(';'):
-                                json_str = json_str[:-1]
-
-                            logger.debug(f"  [Script {i}] Parsing JSON (length: {len(json_str)} chars)")
-                            data = json.loads(json_str)
-                            logger.info(f"✅ Successfully parsed window.__NUXT__ JSON")
-                            return self._extract_character_from_nuxt(data, account, character)
-
-                        # Try __data format
-                        elif 'window.__data' in script_content:
-                            logger.debug(f"  [Script {i}] Found window.__data")
-                            json_start = script_content.find('window.__data=') + len('window.__data=')
-                            json_end = script_content.find(';', json_start)
-                            json_str = script_content[json_start:json_end].strip()
-
-                            logger.debug(f"  [Script {i}] Parsing JSON (length: {len(json_str)} chars)")
-                            data = json.loads(json_str)
-                            logger.info(f"✅ Successfully parsed window.__data JSON")
-                            return self._extract_character_from_data(data, account, character)
-
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"  [Script {i}] Failed to parse JSON: {e}")
-                        continue
-
-            # Fallback: parse HTML structure directly
-            logger.warning(f"⚠️ No embedded JSON found, falling back to HTML parsing")
-            return self._parse_character_from_html(soup, account, character)
-
+            return response.json()
         except Exception as e:
-            logger.error(f"❌ HTML parsing error: {e}", exc_info=True)
+            logger.error(f"Model fetch failed for {character}: {e}")
             return None
-
-    def _extract_character_from_nuxt(self, data: Dict, account: str, character: str) -> Dict[str, Any]:
-        """Extract character data from NUXT format"""
-        try:
-            # Navigate NUXT data structure
-            if 'data' in data:
-                char_data = data['data'][0] if isinstance(data['data'], list) else data['data']
-            else:
-                char_data = data
-
-            # Detect ascendancy from class field
-            raw_class = char_data.get("class", "Unknown")
-            base_class, ascendancy = self._detect_ascendancy(raw_class)
-
-            return {
-                "name": character,
-                "account": account,
-                "class": base_class,
-                "ascendancy": ascendancy,
-                "level": char_data.get("level", 0),
-                "league": char_data.get("league", "Unknown"),
-                "items": char_data.get("items", []),
-                "skills": char_data.get("skills", []),
-                "passives": char_data.get("passiveSkills", []),
-                "stats": char_data.get("stats", {}),
-                "flasks": char_data.get("flasks", []),
-                "jewels": char_data.get("jewels", []),
-                "charms": char_data.get("charms", []),
-                "source": "poe.ninja",
-                "fetched_at": datetime.utcnow().isoformat()
-            }
-        except Exception as e:
-            logger.error(f"Error extracting NUXT data: {e}")
-            return self._create_minimal_character(account, character)
-
-    def _extract_character_from_data(self, data: Dict, account: str, character: str) -> Dict[str, Any]:
-        """Extract character data from __data format"""
-        # Detect ascendancy from class field
-        raw_class = data.get("class", "Unknown")
-        base_class, ascendancy = self._detect_ascendancy(raw_class)
-
-        return {
-            "name": character,
-            "account": account,
-            "class": base_class,
-            "ascendancy": ascendancy,
-            "level": data.get("level", 0),
-            "league": data.get("league", "Unknown"),
-            "items": data.get("items", []),
-            "skills": data.get("skills", []),
-            "passives": data.get("passives", []),
-            "stats": data.get("stats", {}),
-            "flasks": data.get("flasks", []),
-            "jewels": data.get("jewels", []),
-            "charms": data.get("charms", []),
-            "source": "poe.ninja",
-            "fetched_at": datetime.utcnow().isoformat()
-        }
-
-    def _parse_character_from_html(self, soup: BeautifulSoup, account: str, character: str) -> Dict[str, Any]:
-        """Parse character data directly from HTML structure (fallback)"""
-        try:
-            # Try to extract basic info from HTML
-            char_data = self._create_minimal_character(account, character)
-
-            # Look for character level
-            level_elem = soup.find(class_=['level', 'character-level'])
-            if level_elem:
-                try:
-                    char_data["level"] = int(level_elem.text.strip())
-                except ValueError:
-                    pass
-
-            # Look for character class
-            class_elem = soup.find(class_=['class', 'character-class'])
-            if class_elem:
-                char_data["class"] = class_elem.text.strip()
-
-            return char_data
-
-        except Exception as e:
-            logger.error(f"HTML structure parsing error: {e}")
-            return self._create_minimal_character(account, character)
-
-    def _detect_ascendancy(self, raw_class: str) -> tuple:
-        """
-        Detect if a class name is an ascendancy and return (base_class, ascendancy).
-
-        Args:
-            raw_class: The class name from API (could be base class or ascendancy)
-
-        Returns:
-            Tuple of (base_class, ascendancy) where ascendancy is None if not ascended
-        """
-        if raw_class in ASCENDANCY_TO_BASE_CLASS:
-            return (ASCENDANCY_TO_BASE_CLASS[raw_class], raw_class)
-        elif raw_class in BASE_CLASSES:
-            return (raw_class, None)
-        else:
-            # Unknown class - keep as-is
-            return (raw_class, None)
-
-    def _create_minimal_character(self, account: str, character: str) -> Dict[str, Any]:
-        """Create minimal character data structure"""
-        return {
-            "name": character,
-            "account": account,
-            "class": "Unknown",
-            "ascendancy": None,
-            "level": 0,
-            "league": "Unknown",
-            "items": [],
-            "skills": [],
-            "passives": [],
-            "stats": {},
-            "flasks": [],
-            "jewels": [],
-            "charms": [],
-            "source": "poe.ninja (minimal)",
-            "fetched_at": datetime.utcnow().isoformat()
-        }
 
     async def get_top_builds(
         self,
@@ -1183,26 +651,24 @@ class PoeNinjaAPI:
 
     async def get_pob_import(self, account: str, character: str) -> Optional[str]:
         """
-        Get Path of Building import code for a character using poe.ninja's hidden API
+        Get the Path of Building export code for a character.
 
-        This endpoint returns a PoB code that can be imported into Path of Building
+        Rewired (#133): the old ``/poe2/api/builds/pob/import`` snapshot
+        endpoint is dead post-0.5. The export now comes from the profile
+        API's character model — ``charModel.pathOfBuildingExport`` — via:
+        enumeration (league resolution) → char SSE (version) → model.
 
         Args:
             account: Path of Exile account name
-            character: Character name
+            character: Character name (league auto-resolved from the
+                account's profile list)
 
         Returns:
-            Base64-encoded PoB build code or None if not found
-
-        Example:
-            >>> api = PoeNinjaAPI()
-            >>> pob_code = await api.get_pob_import("Tomawar40-2671", "DoesFireWorkGoodNow")
-            >>> print(pob_code)
-            'eJyLjgUAARUAuQ==' # Base64 PoB code
+            Base64-encoded PoB build code, or None when the account is
+            private, the character is unknown, or no export is embedded.
         """
         cache_key = f"ninja_pob_{account}_{character}"
 
-        # Check cache first
         if self.cache_manager:
             cached = await self.cache_manager.get(cache_key)
             if cached:
@@ -1210,60 +676,37 @@ class PoeNinjaAPI:
                 return cached
 
         try:
-            # Rate limit
-            await self.rate_limiter.acquire()
+            logger.info(f"📦 Fetching PoB code via profile API: {character} (Account: {account})")
 
-            logger.info(f"📦 Fetching PoB code for character: {character} (Account: {account})")
-
-            # Call the discovered PoB import API
-            url = f"{self.base_url}/poe2/api/builds/pob/import"
-            params = {
-                "accountName": account,
-                "characterName": character
-            }
-
-            logger.debug(f"Calling PoB API: {url}")
-            logger.debug(f"Parameters: {params}")
-
-            # Add referer header to appear as if coming from character page
-            headers = {
-                "Referer": f"{self.base_url}/poe2/builds/character/{account}/{character}",
-                "Accept": "application/json",
-            }
-
-            response = await self.client.get(url, params=params, headers=headers)
-
-            if response.status_code == 200:
-                data = response.json()
-
-                # The API should return a PoB code
-                # Based on typical poe.ninja API structure, it might be in data['pob'] or data['code']
-                pob_code = data.get("pob") or data.get("code") or data.get("build")
-
-                if pob_code:
-                    logger.info(f"✅ Successfully fetched PoB code for {character}")
-
-                    if self.cache_manager:
-                        await self.cache_manager.set(cache_key, pob_code, ttl=3600)
-
-                    return pob_code
-                else:
-                    logger.warning(f"⚠️ PoB API returned success but no code found")
-                    logger.debug(f"   Response data keys: {list(data.keys())}")
-                    # Return the full data in case it's in a different format
-                    return data
-
-            elif response.status_code == 404:
-                logger.warning(f"⚠️ Character not found for PoB import (404)")
+            league_url = await self.resolve_character_league(account, character)
+            if not league_url:
+                logger.warning(
+                    f"⚠️ Could not resolve league for {character} — account "
+                    f"private or character not on {account}'s profile"
+                )
                 return None
 
-            else:
-                logger.warning(f"⚠️ PoB API returned {response.status_code}")
-                logger.debug(f"   Response: {response.text[:200]}")
+            model = await self._fetch_char_model(account, league_url, character)
+            if not model:
                 return None
+
+            char_model = model.get('charModel') or {}
+            pob_code = char_model.get('pathOfBuildingExport')
+
+            if pob_code:
+                logger.info(f"✅ Got PoB export from charModel for {character}")
+                if self.cache_manager:
+                    await self.cache_manager.set(cache_key, pob_code, ttl=3600)
+                return pob_code
+
+            logger.warning(
+                f"⚠️ Character model for {character} has no pathOfBuildingExport "
+                f"(keys: {list(char_model.keys())[:10]})"
+            )
+            return None
 
         except Exception as e:
-            logger.error(f"❌ PoB import API failed: {e}", exc_info=True)
+            logger.error(f"❌ PoB export fetch failed: {e}", exc_info=True)
             return None
 
     async def close(self):

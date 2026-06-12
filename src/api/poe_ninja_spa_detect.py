@@ -108,10 +108,12 @@ def spa_migration_notice(
     lines.append("")
     lines.append(
         f"Tracked at https://github.com/HivemindOverlord/poe2-mcp/issues/{issue_number}. "
-        "No MCP-side fix until poe.ninja's new runtime XHR endpoint shape is "
-        "reverse-engineered. The per-character JSON API "
-        "(/poe2/api/builds/{version}/character) still works for characters "
-        "present in the current snapshot - analyze_character will try that "
-        "path automatically."
+        "Builds-list/ladder enumeration has no MCP-side fix until poe.ninja's "
+        "new runtime XHR endpoint shape is reverse-engineered. For "
+        "SINGLE-character fetch, the no-auth profile API works "
+        "(/poe2/api/events/character/... -> /poe2/api/profile/characters/"
+        ".../model/{version}) - analyze_character uses it automatically. "
+        "The old snapshot API (/poe2/api/builds/{version}/character) is dead "
+        "and was retired in #133; do not re-chase it."
     )
     return "\n".join(lines)
