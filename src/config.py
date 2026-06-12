@@ -1,11 +1,15 @@
 """
 Configuration management for PoE2 Build Optimizer
 """
+import logging
+import secrets as _secrets
 from pathlib import Path
 from typing import List, Optional
 from pydantic_settings import BaseSettings
-from pydantic import Field, ConfigDict
+from pydantic import Field, ConfigDict, field_validator, model_validator
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 # Define paths first - use absolute paths based on script location
@@ -31,10 +35,31 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = Field(
-        default=f"sqlite:///{DATA_DIR}/poe2_optimizer.db"
+        default=f"sqlite:///{(DATA_DIR / 'poe2_optimizer.db').as_posix()}"
     )
     DB_POOL_SIZE: int = Field(default=10)
     DB_ECHO: bool = Field(default=False)
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def _anchor_relative_sqlite_url(cls, v: str) -> str:
+        """Anchor relative sqlite paths to the repo (#157).
+
+        MCP clients launch the server with arbitrary working directories
+        (Claude Desktop: C:\\WINDOWS\\system32). A .env override like
+        ``sqlite:///data/poe2_optimizer.db`` then resolves into system32 —
+        PermissionError creating ./data, then 'unable to open database
+        file'. Rewrite relative sqlite URLs against BASE_DIR and normalize
+        to forward slashes so SQLAlchemy gets a clean absolute URL.
+        """
+        for scheme in ("sqlite+aiosqlite:///", "sqlite:///"):
+            if v.startswith(scheme):
+                raw = v[len(scheme):]
+                path = Path(raw)
+                if not path.is_absolute():
+                    path = BASE_DIR / raw
+                return f"{scheme}{path.resolve().as_posix()}"
+        return v
 
     # Redis
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
@@ -87,18 +112,36 @@ class Settings(BaseSettings):
     LOG_RETENTION: str = Field(default="7 days")
 
     # Security
-    # CRITICAL: These must be set via environment variables (.env file)
+    # Set via environment variables (.env file) for persistence:
     # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
-    # Never commit actual secrets to version control
-    SECRET_KEY: str = Field(
-        ...,  # Required, no default
+    # Never commit actual secrets to version control.
+    # When unset, an ephemeral cryptographically-random key is generated per
+    # process (see _ensure_secret_keys) so a fresh install starts instead of
+    # dying in a Pydantic ValidationError at import time (#157). Ephemeral
+    # keys mean anything they encrypt/sign does not survive a restart.
+    SECRET_KEY: Optional[str] = Field(
+        default=None,
         description="Cryptographically secure random key for session management"
     )
-    ENCRYPTION_KEY: str = Field(
-        ...,  # Required, no default
+    ENCRYPTION_KEY: Optional[str] = Field(
+        default=None,
         description="Cryptographically secure random key for data encryption"
     )
     SESSION_TIMEOUT: int = Field(default=86400)
+
+    @model_validator(mode="after")
+    def _ensure_secret_keys(self):
+        """Generate ephemeral keys when none are configured (#157)."""
+        for field_name in ("SECRET_KEY", "ENCRYPTION_KEY"):
+            if not getattr(self, field_name):
+                setattr(self, field_name, _secrets.token_hex(32))
+                logger.warning(
+                    f"{field_name} is not set — generated an ephemeral random "
+                    f"key for this process only. Sessions/encrypted data will "
+                    f"not survive a restart. For persistence, add it to .env: "
+                    f'python -c "import secrets; print(secrets.token_hex(32))"'
+                )
+        return self
 
     # Performance
     MAX_WORKERS: int = Field(default=4)
