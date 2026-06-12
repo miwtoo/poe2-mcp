@@ -4,6 +4,7 @@ PoE2 Build Optimizer - Quick Launch Script
 Handles setup and launches the MCP server
 """
 
+import builtins
 import os
 import sys
 import io
@@ -11,10 +12,28 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-# Fix Windows encoding issues
+# Fix Windows encoding issues. reconfigure() keeps the same stream objects —
+# rewrapping sys.stdout.buffer replaced the streams, which broke pytest's
+# capture on import and risked detaching the MCP protocol channel (#157).
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding='utf-8')
+        except (AttributeError, io.UnsupportedOperation):
+            pass
+
+
+def print(*args, **kwargs):  # noqa: A001 — intentional module-level shadow
+    """Route ALL launcher output to stderr (#157).
+
+    When an MCP client (Claude Desktop) runs `python launch.py`, stdout IS
+    the MCP protocol channel — banner text on stdout corrupts the JSON
+    stream ("Unexpected end of JSON input" client-side). Shadowing print
+    for this module keeps every human-readable line on stderr without
+    touching the protocol.
+    """
+    kwargs.setdefault("file", sys.stderr)
+    builtins.print(*args, **kwargs)
 
 # Load .env into os.environ so launcher-level flags (POE2_MCP_AUTO_UPDATE,
 # POE2_MCP_NO_CODE_CHECK, POE2_MCP_NO_DATA_FETCH) are picked up before any
@@ -182,7 +201,9 @@ def show_usage_instructions():
     print(f"{Colors.OKGREEN}{Colors.BOLD}Option 1: Use with Claude Desktop{Colors.ENDC}")
     print("Add this to your Claude Desktop MCP configuration:")
     print(f"{Colors.OKCYAN}")
-    config_path = Path.cwd() / "src" / "mcp_server.py"
+    # Anchor to the repo, not CWD — MCP clients launch with arbitrary
+    # working directories (Claude Desktop uses C:\WINDOWS\system32, #157)
+    config_path = Path(__file__).parent / "src" / "mcp_server.py"
     print('{')
     print('  "mcpServers": {')
     print('    "poe2-optimizer": {')
