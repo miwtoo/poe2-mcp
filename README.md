@@ -8,7 +8,7 @@
 >
 > This is an independent, fan-made community project built out of love for Path of Exile 2. It is **not affiliated with, endorsed by, or officially connected to Grinding Gear Games** in any way. Path of Exile is a trademark of Grinding Gear Games. All game data and assets remain the property of their respective owners.
 
-A Model Context Protocol (MCP) server for Path of Exile 2 character analysis and optimization. Provides 39 MCP tools for AI-powered build analysis, passive tree analysis, item mod validation, support gem validation, and Path of Building integration (including a live bridge to a running PoB instance).
+A Model Context Protocol (MCP) server for Path of Exile 2 character analysis and optimization. Provides 38 MCP tools for AI-powered build analysis, passive tree analysis, item mod validation, support gem validation, and Path of Building integration (including a live bridge to a running PoB instance).
 
 ## What is This?
 
@@ -180,25 +180,35 @@ Check each platform's documentation for MCP server configuration.
 
 ---
 
-## Available Tools (39 Registered)
+## Available Tools (38 Registered)
 
-Once connected, you can ask your AI assistant to use these tools:
+Once connected, you can ask your AI assistant to use these tools. The
+authoritative list is `_register_tools()` in `src/mcp_server.py` — verify
+the live count with:
+
+```bash
+python -c "import re; print(len(re.findall(r'types\.Tool\(\s*name=', open('src/mcp_server.py').read())))"
+```
 
 ### Character Analysis
 | Tool | Description |
 |------|-------------|
-| `analyze_character` | Full character analysis (defenses, skills, gear, passives) |
-| `import_poe_ninja_url` | Import character from poe.ninja URL directly |
-| `compare_to_top_players` | Compare your build to ladder leaders |
-| `analyze_passive_tree` | Analyze allocated passive nodes |
+| `analyze_character` | Full character analysis (defenses, skills, gear, passives); exposes raw `passive_node_ids` |
+| `import_poe_ninja_url` | Import character from a poe.ninja profile URL (league-segment aware) |
+| `compare_to_top_players` | Compare your build to ladder leaders (protobuf builds API) |
+| `analyze_passive_tree` | Analyze allocated passive nodes with pathfinding |
+| `calculate_character_dps` | Server-side spell DPS, including the optional DoT layer (ignite/poison/bleed + skill DoT) |
+| `get_live_game_state` | Read the running PoE2 client's Client.txt (character, area, deaths) — local, no network |
+| `get_game_config` | Read local game config INI (gateway, input mode, renderer) |
 
 ### Validation & Inspection
 | Tool | Description |
 |------|-------------|
-| `validate_support_combination` | Check if support gems work together |
-| `validate_build_constraints` | Validate build against game rules |
-| `inspect_support_gem` | View complete support gem data |
-| `inspect_spell_gem` | View complete spell gem data |
+| `validate_support_combination` | Check if support gems work together (hard + semantic conflicts) |
+| `validate_build_constraints` | Validate build against game rules (flat/nested/legacy resistance schemas, null-tolerant) |
+| `reconcile_defensive_stats` | Diff local EHP/defense calcs against poe.ninja's computed stats |
+| `inspect_support_gem` | View complete support gem data (incl. spirit reservation) |
+| `inspect_spell_gem` | View complete spell gem data (per-level costs/reservation) |
 | `list_all_supports` | List all available support gems |
 | `list_all_spells` | List all available spell gems |
 
@@ -209,7 +219,7 @@ Once connected, you can ask your AI assistant to use these tools:
 | `inspect_keystone` | Get complete keystone details by name |
 | `list_all_notables` | List all notable passives with stats |
 | `inspect_passive_node` | Get details for any passive node |
-| `get_ascendancy_info` | Get nodes and details for an ascendancy class |
+| `check_tree_freshness` | Report passive-tree data revision vs poe.ninja |
 
 ### Base Item Data
 | Tool | Description |
@@ -227,26 +237,19 @@ Once connected, you can ask your AI assistant to use these tools:
 | `validate_item_mods` | Check if mods can legally exist together on an item |
 | `get_available_mods` | List all mods available for a generation type |
 
+### Knowledge & Discovery
+| Tool | Description |
+|------|-------------|
+| `explain_mechanic` | Explain PoE2 mechanics / stat ids; tiered exact → substring → BM25 lexical; `cluster: true` dumps a mechanic's full stat-id + source web |
+| `find_stat_sources` | Reverse lookup: which skills / passives / ascendancy nodes / mods grant a stat |
+| `get_formula` | Get calculation formulas |
+
 ### Path of Building (file-based)
 | Tool | Description |
 |------|-------------|
-| `import_pob` | Import Path of Building code |
+| `import_pob` | Import a PoB build — from `pob_file_path`, raw `pob_xml`, or inline `pob_code` |
 | `export_pob` | Export build to PoB format |
-| `get_pob_code` | Get PoB code for a character |
-
-### Path of Building (live bridge)
-Requires the MCP Bridge addon installed in PoB (see `pob_addon/`). Talks to a running PoB instance over a local TCP socket (127.0.0.1:49085).
-
-| Tool | Description |
-|------|-------------|
-| `pob_connect` | Connect to a running PoB instance |
-| `pob_disconnect` | Disconnect from PoB |
-| `pob_status` | Check whether PoB is reachable |
-| `pob_push_build` | Send a build into PoB for visualization |
-| `pob_pull_calcs` | Read DPS/EHP/resistances from PoB's calc engine |
-| `pob_pull_build` | Pull the current build from PoB |
-| `pob_set_skill` | Add/modify a skill setup in PoB |
-| `pob_get_passive_tree` | Query allocated passive nodes from PoB |
+| `get_pob_code` | Get a character's PoB export via the poe.ninja profile API |
 
 ### Trade & Items
 | Tool | Description |
@@ -255,15 +258,20 @@ Requires the MCP Bridge addon installed in PoB (see `pob_addon/`). Talks to a ru
 | `search_trade_items` | Search official trade site (requires auth) |
 | `setup_trade_auth` | Set up trade site authentication |
 
-### Knowledge & Utility
+### Utility
 | Tool | Description |
 |------|-------------|
-| `explain_mechanic` | Explain PoE2 game mechanics |
-| `get_formula` | Get calculation formulas |
 | `health_check` | Check server status |
 | `clear_cache` | Clear cached data |
 
-> **Note:** Additional tools (DPS calculator, EHP calculator, optimizers) have handlers implemented but are not yet registered. These may be enabled in future updates.
+> **Live Path of Building bridge:** `src/pob/client.py` + the `pob_addon/`
+> Lua addon implement a TCP bridge (127.0.0.1:49085) to a running PoB
+> instance. The bridge client exists but its `pob_*` operations are **not
+> currently registered as MCP tools** — they are used internally / via the
+> integration test suite. They are not in the 38 above.
+>
+> **Not registered:** DPS/EHP standalone calculators, optimizers, and the
+> live `pob_*` bridge ops have handlers/clients but no tool registration yet.
 
 ---
 
@@ -349,6 +357,15 @@ python -m src.data.data_distributor
 
 **Data policy:** The bundle is extracted exclusively from the maintainer's licensed PoE2 install via the in-repo extraction scripts. No third-party wiki / scraped data is bundled. See `CLAUDE.md` "Data Source Policy" for details.
 
+**Data currency & drift protection:** The shipped datasets are extracted
+from the full Patch 0.5 table set (1,019 canonical `.datc64` balance tables
+via `scripts/extract_balance_tables_v1.py`), versioned in
+`data/game/version.json` (`data-v0.5.0-r12`). `data/game/schema_fingerprints.json`
+records every table's row-count/row-size/hash; re-extraction diffs against it
+so a future patch that adds, moves, or resizes columns fails loudly instead
+of serving silently-wrong data. See `docs/GAME_DATA_RESEARCH.md` for the
+reverse-engineered file format and extraction methodology.
+
 ---
 
 ## Architecture
@@ -357,7 +374,7 @@ python -m src.data.data_distributor
 poe2-mcp/
 ├── launch.py              # Entry point
 ├── src/
-│   ├── mcp_server.py      # Main MCP server (39 tools registered)
+│   ├── mcp_server.py      # Main MCP server (38 tools registered)
 │   ├── api/               # External API clients
 │   │   ├── poe_ninja_api.py
 │   │   ├── character_fetcher.py
@@ -409,7 +426,7 @@ python launch.py
 ```
 
 ### Key Files
-- `src/mcp_server.py` - MCP server with 39 registered tools
+- `src/mcp_server.py` - MCP server with 38 registered tools
 - `src/data/mod_data_provider.py` - Item mod data access layer
 - `src/calculator/ehp_calculator.py` - EHP calculations
 - `src/optimizer/gem_synergy_calculator.py` - Support gem logic
