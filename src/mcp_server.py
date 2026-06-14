@@ -571,7 +571,24 @@ class PoE2BuildOptimizerMCP:
                 ),
                 types.Tool(
                     name="search_trade_items",
-                    description="Search the official PoE2 trade site for items. Requires POESESSID (use setup_trade_auth first).",
+                    description=(
+                        "Search the official PoE2 trade site for items. "
+                        "Requires POESESSID (use setup_trade_auth first).\n\n"
+                        "Two modes:\n"
+                        "1. RAW SEARCH — pass `category` (e.g. 'weapon.bow'), "
+                        "`base_type`, `name`, `term`, `item_filters`, or any "
+                        "combination. Returns a flat item list.\n"
+                        "2. UPGRADE SEARCH — pass `character_needs` with "
+                        "`item_slots`, `missing_resistances`, etc. "
+                        "Returns categorised upgrade suggestions for "
+                        "charms/amulets/helmets.\n\n"
+                        "Examples:\n"
+                        "- 'weapon.bow' : `{\"category\": \"weapon.bow\"}`\n"
+                        "- boots with life : "
+                        "`{\"term\": \"boots\", \"item_filters\": "
+                        "{\"type_filters\": {\"filters\": "
+                        "{\"category\": {\"option\": \"armour.boots\"}}}}}`"
+                    ),
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -580,16 +597,52 @@ class PoE2BuildOptimizerMCP:
                                 "description": "League name",
                                 "default": "Standard"
                             },
+                            # --- Legacy upgrade-search params ---
                             "character_needs": {
                                 "type": "object",
-                                "description": "What the character needs (resistances, life, ES, item_slots)"
+                                "description": "What the character needs (resistances, life, ES, item_slots) — for upgrade search mode"
                             },
                             "max_price_chaos": {
                                 "type": "integer",
-                                "description": "Maximum price in chaos orbs"
+                                "description": "Maximum price in chaos orbs (upgrade mode only)"
+                            },
+                            # --- Raw/category search params ---
+                            "category": {
+                                "type": "string",
+                                "description": "Item category filter, e.g. 'weapon.bow', 'armour.helmet', 'accessory.amulet'. Maps to type_filters.filters.category.option in the Trade2 API."
+                            },
+                            "base_type": {
+                                "type": "string",
+                                "description": "Exact base type name, e.g. 'Expert Hunter Bow'. Maps to type_filters.filters.base_type.option."
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "Item name or unique name (string is converted to Trade2 format automatically)."
+                            },
+                            "term": {
+                                "type": "string",
+                                "description": "Free-text search term (item name or description keyword)."
+                            },
+                            "status": {
+                                "type": "string",
+                                "description": "Listing status: 'online' (default for raw searches), 'any', or 'securable'",
+                                "default": "online"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of results to return",
+                                "default": 10
+                            },
+                            "item_filters": {
+                                "type": "object",
+                                "description": "Raw Trade2 API filter groups. Shape: {\"type_filters\": {\"filters\": {\"category\": {\"option\": \"weapon.bow\"}}}, \"misc_filters\": {...}}. Merged with the category/base_type shorthand fields if both are set."
+                            },
+                            "max_price_exalted": {
+                                "type": "number",
+                                "description": "Maximum price in exalted orbs. Applied via trade_filters.price."
                             }
                         },
-                        "required": ["league", "character_needs"]
+                        "required": ["league"]
                     }
                 ),
 
@@ -2224,10 +2277,16 @@ poe.ninja migrated their builds/character pages to a client-side rendered SPA at
             )]
 
     async def _handle_search_trade_items(self, args: dict) -> List[types.TextContent]:
-        """Handle trade item search"""
+        """Handle trade item search — two modes:
+
+        1. RAW SEARCH: when any of category/base_type/name/term/item_filters is
+           provided. Calls TradeAPI.search_items() directly with the given filters.
+        2. LEGACY UPGRADE SEARCH: when only character_needs is present. Calls
+           TradeAPI.search_for_upgrades() for charms/amulets/helmets.
+        """
         league = args.get("league", "Standard")
-        character_needs = args.get("character_needs", {})
         max_price_chaos = args.get("max_price_chaos")
+        max_price_exalted = args.get("max_price_exalted")
 
         if not self.trade_api:
             return [types.TextContent(
@@ -2256,9 +2315,45 @@ poe.ninja migrated their builds/character pages to a client-side rendered SPA at
             )]
 
         try:
+            # --- Detect mode: raw vs legacy upgrade ---
+            raw_params_present = any(
+                k in args and args[k] not in (None, {}, [])
+                for k in ("category", "base_type", "name", "term", "item_filters")
+            )
+
+            if raw_params_present:
+                return await self._handle_search_trade_items_raw(
+                    league, args, max_price_exalted
+                )
+
+            # --- Legacy upgrade-search path ---
+            character_needs = args.get("character_needs", {})
+
+            # Check for unsupported item_slots and surface helpful message
+            item_slots = character_needs.get("item_slots", [])
+            unsupported = [s for s in item_slots if s not in ("charm", "amulet", "helmet")]
+            if unsupported:
+                # Return a helpful message instead of silently returning empty
+                slot_help = "\n".join(
+                    f"- `{s}` → use `category: weapon.{s}` or `category: armour.{s}`"
+                    for s in unsupported
+                )
+                return [types.TextContent(
+                    type="text",
+                    text=(
+                        f"Unsupported item_slot(s) in upgrade search: "
+                        f"{', '.join(unsupported)}.\n\n"
+                        f"The upgrade search (`character_needs`) only supports "
+                        f"charms, amulets, and helmets.\n\n"
+                        f"**For other slots, use raw search:**\n"
+                        f"{slot_help}\n\n"
+                        f"Example:\n"
+                        f'`{{\\"category\\": \\"weapon.bow\\"}}`'
+                    )
+                )]
+
             logger.info(f"Searching trade market for upgrades in {league}...")
 
-            # Perform search
             results = await self.trade_api.search_for_upgrades(
                 league=league,
                 character_needs=character_needs,
@@ -2274,9 +2369,7 @@ poe.ninja migrated their builds/character pages to a client-side rendered SPA at
                          "- Checking if the league name is correct"
                 )]
 
-            # Format response
             response = self._format_trade_search_results(results, character_needs, max_price_chaos)
-
             return [types.TextContent(type="text", text=response)]
 
         except Exception as e:
@@ -2288,6 +2381,76 @@ poe.ninja migrated their builds/character pages to a client-side rendered SPA at
                      "**To refresh:** Use the `setup_trade_auth` tool to get a new cookie.\n"
                      "Or manually update POESESSID in your .env file and restart the server."
             )]
+
+    async def _handle_search_trade_items_raw(
+        self,
+        league: str,
+        args: dict,
+        max_price_exalted: Optional[float] = None,
+    ) -> List[types.TextContent]:
+        """Raw trade search path — builds filters and calls search_items directly."""
+        limit = min(int(args.get("limit", 10)), 50)
+        status = args.get("status", "online")
+        category = args.get("category")
+        base_type = args.get("base_type")
+        name = args.get("name")
+        term = args.get("term")
+        item_filters = args.get("item_filters", {})
+
+        # Build the filter dict
+        filters: Dict[str, Any] = {
+            "status": status,
+        }
+
+        if term:
+            filters["term"] = term
+
+        if name:
+            # Trade2 API uses name as plain string at query level (not {"option": name}).
+            # If caller already passes a dict, pass through unchanged.
+            filters["name"] = name if isinstance(name, dict) else name
+
+        if category or base_type:
+            # Merge with any user-supplied item_filters
+            tf = dict(item_filters.get("type_filters", {}))
+            tf.setdefault("filters", {})
+            if category:
+                tf["filters"]["category"] = {"option": category}
+            if base_type:
+                tf["filters"]["base_type"] = {"option": base_type}
+            item_filters["type_filters"] = tf
+
+        if item_filters:
+            filters["item_filters"] = item_filters
+
+        # Price filter via trade_filters
+        # Trade2 shape: trade_filters.filters.price = {"option": "exalted", "min": 0, "max": N}
+        if max_price_exalted is not None and max_price_exalted > 0:
+            filters["trade_filters"] = {
+                "filters": {
+                    "price": {
+                        "option": "exalted",
+                        "min": 0,
+                        "max": max_price_exalted,
+                    }
+                }
+            }
+
+        logger.info(f"Raw trade search in {league} (limit={limit})")
+        items = await self.trade_api.search_items(league, filters, limit=limit)
+
+        if not items:
+            return [types.TextContent(
+                type="text",
+                text=f"No items found matching your criteria in {league}.\n"
+                     "Suggestions:\n"
+                     "- Check the category name (e.g. 'weapon.bow', 'armour.helmet')\n"
+                     "- Remove or broaden filters\n"
+                     "- Verify your POESESSID is still valid (use setup_trade_auth)"
+            )]
+
+        response = self._format_raw_trade_results(items, category or "items", limit)
+        return [types.TextContent(type="text", text=response)]
 
     async def _handle_detect_weaknesses(self, args: dict) -> List[types.TextContent]:
         """Handle character weakness detection"""
@@ -7895,6 +8058,69 @@ Could not extract account and character from URL.
 
         result += "\n"
         return result
+
+    def _format_raw_trade_results(self, items: List[Dict], label: str, limit: int) -> str:
+        """Format a flat list of raw trade search results (no upgrade grouping)."""
+        response = f"# Trade Search Results: {label}\n\n"
+        response += f"**Found {len(items)} item(s)**\n\n"
+
+        for i, item in enumerate(items, 1):
+            name = item.get("name") or item.get("type") or item.get("base_type", "Unknown")
+            item_type = item.get("type", "")
+            base_type = item.get("base_type", "")
+            ilvl = item.get("item_level", 0)
+            corrupted = " [CORRUPTED]" if item.get("corrupted") else ""
+
+            # Price
+            price = item.get("price", {})
+            price_amount = price.get("amount", "?")
+            price_currency = price.get("currency", "?")
+
+            # Seller
+            seller = item.get("seller", {})
+            seller_name = seller.get("account", "Unknown")
+            online = seller.get("online", False)
+            online_emoji = "🟢" if online else "🔴"
+
+            # Compute pDPS approximation (simple average of physical damage if available)
+            pdps_str = ""
+            props = item.get("properties", [])
+            for p in props:
+                if isinstance(p, dict) and "Physical Damage" in str(p.get("name", "")):
+                    vals = p.get("values", [])
+                    if vals and len(vals) > 0:
+                        pdps_str = f" | pDPS: {vals[0]}"
+                    break
+
+            response += (
+                f"**[{i}] {name}**{corrupted}\n"
+                f"- Type: {item_type or base_type or '?'} (iLvl {ilvl}){pdps_str}\n"
+                f"- Price: **{price_amount} {price_currency}**\n"
+                f"- Seller: {seller_name} [{online_emoji}]\n"
+            )
+
+            # Mods
+            explicit_mods = item.get("explicit_mods", [])
+            implicit_mods = item.get("implicit_mods", [])
+
+            if implicit_mods:
+                response += "- Implicit:\n"
+                for mod in implicit_mods[:2]:
+                    response += f"  - {mod}\n"
+
+            if explicit_mods:
+                response += "- Explicit:\n"
+                for mod in explicit_mods[:4]:
+                    response += f"  - {mod}\n"
+                if len(explicit_mods) > 4:
+                    response += f"  - ... and {len(explicit_mods) - 4} more\n"
+
+            response += "\n"
+
+        if len(items) >= limit:
+            response += "*Results limited — increase `limit` for more.*\n"
+
+        return response
 
     async def run(self):
         """Run the MCP server"""

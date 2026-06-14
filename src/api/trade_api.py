@@ -236,9 +236,27 @@ class TradeAPI:
         if "stats" in filters and filters["stats"]:
             query["query"]["stats"] = self._build_stat_filters(filters["stats"])
 
-        # Item filters (sockets, links, etc.)
+        # Status override (raw searches default to "online")
+        if "status" in filters:
+            query["query"]["status"] = {"option": filters["status"]}
+
+        # Item filters (type_filters, misc_filters, weapon_filters, armour_filters, etc.)
         if "item_filters" in filters:
-            query["query"]["filters"] = filters["item_filters"]
+            # Merge into existing filters rather than replacing — allows callers to
+            # set e.g. type_filters.category alongside trade_filters.price from the
+            # max_price_exalted shorthand.
+            existing = query["query"].get("filters")
+            if existing and isinstance(existing, dict):
+                existing.update(filters["item_filters"])
+            else:
+                query["query"]["filters"] = filters["item_filters"]
+
+        # Trade filters (price range, etc.)
+        if "trade_filters" in filters:
+            existing = query["query"].setdefault("filters", {})
+            trade = existing.setdefault("trade_filters", {})
+            t_filters = trade.setdefault("filters", {})
+            t_filters.update(filters["trade_filters"].get("filters", {}))
 
         return query
 
