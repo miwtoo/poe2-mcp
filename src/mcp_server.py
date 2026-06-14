@@ -8,6 +8,8 @@ import asyncio
 import json
 import logging
 import sys
+import tempfile
+import urllib.parse
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -401,6 +403,8 @@ class PoE2BuildOptimizerMCP:
                 return await self._handle_export_pob(arguments)
             elif name == "get_pob_code":
                 return await self._handle_get_pob_code(arguments)
+            elif name == "calculate_pob2_dps":
+                return await self._handle_calculate_pob2_dps(arguments)
             elif name == "health_check":
                 return await self._handle_health_check(arguments)
             elif name == "clear_cache":
@@ -797,6 +801,48 @@ class PoE2BuildOptimizerMCP:
                             }
                         },
                         "required": ["account", "character"]
+                    }
+                ),
+                types.Tool(
+                    name="calculate_pob2_dps",
+                    description=(
+                        "Calculate DPS by running Path of Building 2's headless LuaJIT "
+                        "engine against a PoB XML build. Requires local POB2_SRC_PATH and "
+                        "LUAJIT_PATH (or runtime/ defaults). Provide exactly one of "
+                        "build_xml_path, build_xml_content, build_share_code, or "
+                        "poe_ninja_url. MVP uses the build's saved selected skill; "
+                        "skill_selector is rejected with an unsupported_feature error."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "build_xml_path": {
+                                "type": "string",
+                                "description": "Local path to a PoB XML build file"
+                            },
+                            "build_xml_content": {
+                                "type": "string",
+                                "description": "Raw uncompressed PoB XML content"
+                            },
+                            "build_share_code": {
+                                "type": "string",
+                                "description": "PoB share code (base64 + zlib) to decode to XML before calculation"
+                            },
+                            "poe_ninja_url": {
+                                "type": "string",
+                                "description": "poe.ninja profile URL (e.g. https://poe.ninja/poe2/profile/Account/League/character/Name). Fetches the PoB export from poe.ninja, decodes it, and runs the headless calculation."
+                            },
+                            "skill_selector": {
+                                "type": "object",
+                                "description": "Exact skill selector for future use; MVP rejects it rather than guessing"
+                            },
+                            "timeout_seconds": {
+                                "type": "number",
+                                "default": 30,
+                                "description": "Subprocess timeout in seconds (default 30, max 300)"
+                            }
+                        },
+                        "required": []
                     }
                 ),
 
@@ -2011,6 +2057,227 @@ Tracked at https://github.com/HivemindOverlord/poe2-mcp/issues/61.
                 type="text",
                 text=f"PoB import failed: {str(e)}"
             )]
+
+    async def _handle_calculate_pob2_dps(self, args: dict) -> List[types.TextContent]:
+        """Calculate DPS through a local PoB2 headless LuaJIT subprocess.
+
+        Input contract differs from calculate_character_dps: this tool consumes
+        a full PoB XML build (path, raw XML, share code, or poe.ninja URL) and
+        delegates all game math to Path of Building 2. It never falls back to
+        the custom estimator because lossy XML -> aggregate-mod conversion
+        would be misleading.
+        """
+
+        def as_text(payload: dict) -> List[types.TextContent]:
+            return [types.TextContent(type="text", text=json.dumps(payload, indent=2, sort_keys=True))]
+
+        # P2: reject skill_selector early.
+        if args.get("skill_selector") is not None:
+            return as_text({
+                "ok": False,
+                "error": {
+                    "type": "unsupported_feature",
+                    "message": (
+                        "skill_selector is not supported by the MVP PoB2 headless bridge. "
+                        "The bridge uses the build's saved selected skill. Explicit skill "
+                        "selection will be added when PoB2 skill internals are stabilized."
+                    ),
+                },
+            })
+
+        build_xml_path = args.get("build_xml_path")
+        build_xml_content = args.get("build_xml_content")
+        build_share_code = args.get("build_share_code")
+        poe_ninja_url = args.get("poe_ninja_url")
+        provided = [
+            name for name, value in (
+                ("build_xml_path", build_xml_path),
+                ("build_xml_content", build_xml_content),
+                ("build_share_code", build_share_code),
+                ("poe_ninja_url", poe_ninja_url),
+            ) if value
+        ]
+
+        if len(provided) != 1:
+            return as_text({
+                "ok": False,
+                "error": {
+                    "type": "input_validation",
+                    "message": (
+                        "Provide exactly one of build_xml_path, build_xml_content, "
+                        f"build_share_code, or poe_ninja_url; got {provided or 'none'}."
+                    ),
+                },
+            })
+
+        temp_xml_path: Optional[Path] = None
+        source = provided[0]
+
+        try:
+            if source == "build_xml_path":
+                path_str = str(build_xml_path)
+                # P1: URL check before path resolution.
+                if path_str.lower().startswith(("http://", "https://")):
+                    raise ValueError("build_xml_path must be a local file path, not a URL")
+                xml_path = Path(path_str).expanduser().resolve()
+
+            elif source == "build_xml_content":
+                content = str(build_xml_content)
+                if not content.lstrip("﻿\ufeff\r\n\t ").startswith("<"):
+                    raise ValueError("build_xml_content must look like raw XML")
+                # P2: size limit
+                content_bytes = len(content.encode("utf-8"))
+                if content_bytes > 10000000:
+                    raise ValueError(
+                        f"build_xml_content too large ({content_bytes} bytes). "
+                        f"PoB builds should be under ~10 MB."
+                    )
+                temp = tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", suffix=".xml", prefix="pob2-build-", delete=False
+                )
+                try:
+                    temp.write(content)
+                finally:
+                    temp.close()
+                temp_xml_path = Path(temp.name)
+                xml_path = temp_xml_path
+
+            elif source == "build_share_code":
+                code = str(build_share_code)
+                # P2: size limit
+                if len(code) > 2000000:
+                    raise ValueError(
+                        f"build_share_code too large ({len(code)} bytes). "
+                        f"PoB share codes should be under ~2 MB."
+                    )
+                importer = self.pob_importer or PoBImporter()
+                xml_text = importer._decode_pob_code(code)
+                temp = tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", suffix=".xml", prefix="pob2-build-", delete=False
+                )
+                try:
+                    temp.write(xml_text)
+                finally:
+                    temp.close()
+                temp_xml_path = Path(temp.name)
+                xml_path = temp_xml_path
+
+            else:  # poe_ninja_url
+                url = str(poe_ninja_url).strip()
+                parsed = urllib.parse.urlparse(url)
+                if parsed.scheme not in ("http", "https"):
+                    raise ValueError(
+                        f"poe_ninja_url must be an http/https URL; got scheme '{parsed.scheme}'"
+                    )
+                # Parse the URL to extract account/character/league.
+                try:
+                    from .api.poe_ninja_api import parse_poe_ninja_url
+                except ImportError:
+                    from src.api.poe_ninja_api import parse_poe_ninja_url
+
+                parsed_url = parse_poe_ninja_url(url)
+                if not parsed_url:
+                    raise ValueError(
+                        f"Could not extract account/character from poe_ninja_url: {url}. "
+                        f"Expected a URL like https://poe.ninja/poe2/profile/Account/League/character/Name."
+                    )
+
+                account = parsed_url["account"]
+                character = parsed_url["character"]
+                league = parsed_url.get("league") or parsed_url.get("league_slug")
+
+                # Fetch PoB export from poe.ninja.
+                if not self.char_fetcher or not self.char_fetcher.ninja_api:
+                    raise RuntimeError(
+                        "char_fetcher is not available; cannot fetch PoB export from poe.ninja. "
+                        "Provide build_xml_path, build_xml_content, or build_share_code instead."
+                    )
+
+                pob_code = await self.char_fetcher.ninja_api.get_pob_import(account, character)
+                if not pob_code:
+                    return as_text({
+                        "ok": False,
+                        "error": {
+                            "type": "pob_export_unavailable",
+                            "message": (
+                                f"PoB export not available for {character}@{account} "
+                                f"(league: {league or 'auto'}). The character may not have "
+                                f"a Path of Building export on poe.ninja, or the account "
+                                f"may be private."
+                            ),
+                            "account": account,
+                            "character": character,
+                            "league": league,
+                        },
+                        "metadata": {"build_source": source},
+                    })
+
+                # Decode share code to XML.
+                importer = self.pob_importer or PoBImporter()
+                try:
+                    xml_text = importer._decode_pob_code(pob_code)
+                except ValueError as decode_err:
+                    return as_text({
+                        "ok": False,
+                        "error": {
+                            "type": "invalid_pob_export",
+                            "message": (
+                                f"PoB export for {character}@{account} could not be "
+                                f"decoded: {decode_err}. The export may be corrupted."
+                            ),
+                            "account": account,
+                            "character": character,
+                            "league": league,
+                        },
+                        "metadata": {"build_source": source},
+                    })
+
+                temp = tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", suffix=".xml", prefix="pob2-build-", delete=False
+                )
+                try:
+                    temp.write(xml_text)
+                finally:
+                    temp.close()
+                temp_xml_path = Path(temp.name)
+                xml_path = temp_xml_path
+
+            try:
+                from .pob.headless_client import calculate_pob2_dps
+            except ImportError:
+                from src.pob.headless_client import calculate_pob2_dps
+
+            result = await asyncio.to_thread(
+                calculate_pob2_dps,
+                xml_path,
+                skill_selector=None,  # already rejected above, but defense-in-depth
+                timeout_seconds=args.get("timeout_seconds"),
+            )
+            result.setdefault("metadata", {})["build_source"] = source
+            if source == "poe_ninja_url":
+                result["metadata"].update({
+                    "account": account,
+                    "character": character,
+                    "league": league,
+                    "url": url,
+                })
+            return as_text(result)
+
+        except Exception as e:
+            return as_text({
+                "ok": False,
+                "error": {
+                    "type": "input_validation" if isinstance(e, ValueError) else "handler_error",
+                    "message": str(e),
+                },
+                "metadata": {"build_source": source},
+            })
+        finally:
+            if temp_xml_path is not None:
+                try:
+                    temp_xml_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     async def _handle_export_pob(self, args: dict) -> List[types.TextContent]:
         """Handle PoB export"""

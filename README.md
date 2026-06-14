@@ -8,7 +8,7 @@
 >
 > This is an independent, fan-made community project built out of love for Path of Exile 2. It is **not affiliated with, endorsed by, or officially connected to Grinding Gear Games** in any way. Path of Exile is a trademark of Grinding Gear Games. All game data and assets remain the property of their respective owners.
 
-A Model Context Protocol (MCP) server for Path of Exile 2 character analysis and optimization. Provides 38 MCP tools for AI-powered build analysis, passive tree analysis, item mod validation, support gem validation, and Path of Building integration (including a live bridge to a running PoB instance).
+A Model Context Protocol (MCP) server for Path of Exile 2 character analysis and optimization. Provides 39 MCP tools for AI-powered build analysis, passive tree analysis, item mod validation, support gem validation, and Path of Building integration (including headless PoB2 DPS calculation where a local PoB2 runtime is configured).
 
 ## What is This?
 
@@ -180,7 +180,7 @@ Check each platform's documentation for MCP server configuration.
 
 ---
 
-## Available Tools (38 Registered)
+## Available Tools (39 Registered)
 
 Once connected, you can ask your AI assistant to use these tools. The
 authoritative list is `_register_tools()` in `src/mcp_server.py` — verify
@@ -250,6 +250,14 @@ python -c "import re; print(len(re.findall(r'types\.Tool\(\s*name=', open('src/m
 | `import_pob` | Import a PoB build — from `pob_file_path`, raw `pob_xml`, or inline `pob_code` |
 | `export_pob` | Export build to PoB format |
 | `get_pob_code` | Get a character's PoB export via the poe.ninja profile API |
+| `calculate_pob2_dps` | Run a local PoB2 headless LuaJIT subprocess against a PoB XML build and return PoB2 DPS fields |
+
+`calculate_pob2_dps` requires a local PoB2 runtime. Set `POB2_SRC_PATH` to
+`PathOfBuilding-PoE2/src` and `LUAJIT_PATH` to `luajit`/`luajit.exe`, or place
+them under `runtime/pob2/src` and `runtime/luajit/`. Provide exactly one of
+`build_xml_path`, `build_xml_content`, or `build_share_code`. MVP uses the
+build's saved selected skill; explicit `skill_selector` is rejected with a clear
+error until exact PoB2 skill-selection internals are stabilized.
 
 ### Trade & Items
 | Tool | Description |
@@ -268,7 +276,7 @@ python -c "import re; print(len(re.findall(r'types\.Tool\(\s*name=', open('src/m
 > Lua addon implement a TCP bridge (127.0.0.1:49085) to a running PoB
 > instance. The bridge client exists but its `pob_*` operations are **not
 > currently registered as MCP tools** — they are used internally / via the
-> integration test suite. They are not in the 38 above.
+> integration test suite. They are not in the registered tool list above.
 >
 > **Not registered:** DPS/EHP standalone calculators, optimizers, and the
 > live `pob_*` bridge ops have handlers/clients but no tool registration yet.
@@ -374,7 +382,7 @@ reverse-engineered file format and extraction methodology.
 poe2-mcp/
 ├── launch.py              # Entry point
 ├── src/
-│   ├── mcp_server.py      # Main MCP server (38 tools registered)
+│   ├── mcp_server.py      # Main MCP server (39 tools registered)
 │   ├── api/               # External API clients
 │   │   ├── poe_ninja_api.py
 │   │   ├── character_fetcher.py
@@ -426,7 +434,7 @@ python launch.py
 ```
 
 ### Key Files
-- `src/mcp_server.py` - MCP server with 38 registered tools
+- `src/mcp_server.py` - MCP server with 39 registered tools
 - `src/data/mod_data_provider.py` - Item mod data access layer
 - `src/calculator/ehp_calculator.py` - EHP calculations
 - `src/optimizer/gem_synergy_calculator.py` - Support gem logic
