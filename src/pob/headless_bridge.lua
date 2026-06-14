@@ -111,6 +111,34 @@ local function output_field(output, name)
   return safe_tonumber(output[name])
 end
 
+-- Per-field fallback: try primary table first, then candidate tables in order.
+-- Only used for AverageHit unless other fields are confirmed safe.
+local function field_fallback(key, primary, ...)
+  local val = output_field(primary, key)
+  if val ~= nil then return val end
+  local candidates = {...}
+  for i = 1, #candidates do
+    local tbl = candidates[i]
+    if type(tbl) == "table" then
+      val = output_field(tbl, key)
+      if val ~= nil then return val end
+    end
+  end
+  return nil
+end
+
+-- Resolve a dotted path like "MainHand.AverageHit" into a numeric value
+-- by traversing nested tables. Returns nil if any segment is missing/non-table.
+local function nested_field(output, path)
+  if type(output) ~= "table" then return nil end
+  local val = output
+  for part in path:gmatch("[^.]+") do
+    if type(val) ~= "table" then return nil end
+    val = val[part]
+  end
+  return safe_tonumber(val)
+end
+
 local function collect_available_skills(build)
   local result = {}
   local groups = build and build.skillsTab and build.skillsTab.socketGroupList
@@ -213,6 +241,51 @@ local function diagnostics_for_nil_output(active_build)
   return d
 end
 
+-- Helper: inspect nested key presence and type for a table (caps sub-keys).
+local function inspect_nested_diag(tbl, prefix, diag)
+  if type(tbl) ~= "table" then
+    diag[prefix .. "_type"] = type(tbl)
+    return
+  end
+  diag[prefix .. "_type"] = "table"
+  diag[prefix .. "_has_AverageHit"] = (tbl.AverageHit ~= nil)
+  diag[prefix .. "_has_MainHand"] = (type(tbl.MainHand) == "table")
+  diag[prefix .. "_has_OffHand"] = (type(tbl.OffHand) == "table")
+  diag[prefix .. "_has_AverageDamage"] = (tbl.AverageDamage ~= nil)
+  if type(tbl.MainHand) == "table" then
+    diag[prefix .. "_MainHand.AverageHit"] = safe_tonumber(tbl.MainHand.AverageHit)
+    diag[prefix .. "_MainHand.AverageDamage"] = safe_tonumber(tbl.MainHand.AverageDamage)
+    diag[prefix .. "_MainHand_keys"] = table_keys(tbl.MainHand)
+  end
+  if type(tbl.OffHand) == "table" then
+    diag[prefix .. "_OffHand.AverageHit"] = safe_tonumber(tbl.OffHand.AverageHit)
+    diag[prefix .. "_OffHand_keys"] = table_keys(tbl.OffHand)
+  end
+end
+
+-- Env-gated: dumps top-level and nested DPS-relevant keys from candidate
+-- output tables when POB2_HEADLESS_DEBUG_OUTPUT=1. Safe for JSON; does not
+-- dump XML, items, recursive tables, or full build state.
+local function add_debug_output_diagnostics(active_build)
+  local debug_env = os.getenv("POB2_HEADLESS_DEBUG_OUTPUT")
+  if debug_env ~= "1" then return nil end
+  local d = {}
+  local calcsTab = active_build and active_build.calcsTab
+  if type(calcsTab) ~= "table" then
+    d.calcsTab_type = type(calcsTab)
+    return d
+  end
+  inspect_nested_diag(calcsTab.mainOutput, "mainOutput", d)
+  local player = calcsTab.mainEnv and calcsTab.mainEnv.player
+  d.mainEnv_player_type = type(player)
+  if type(player) == "table" then
+    d.mainEnv_player_keys = table_keys(player)
+    inspect_nested_diag(player.output, "mainEnv_player_output", d)
+  end
+  inspect_nested_diag(calcsTab.calcsOutput, "calcsOutput", d)
+  return d
+end
+
 local function launch_pob2()
   package.path = "../runtime/lua/?.lua;../runtime/lua/?/init.lua;" .. package.path
   package.cpath = "../runtime/?.dll;../runtime/?.so;../runtime/?.dylib;" .. package.cpath
@@ -292,7 +365,15 @@ local function run_calculation(opts)
     CombinedDPS = output_field(output, "CombinedDPS"),
     FullDPS = output_field(output, "FullDPS"),
     FullDotDPS = output_field(output, "FullDotDPS"),
-    AverageHit = output_field(output, "AverageHit"),
+    AverageHit = field_fallback("AverageHit", output,
+      active_build.calcsTab.mainEnv and active_build.calcsTab.mainEnv.player and active_build.calcsTab.mainEnv.player.output,
+      active_build.calcsTab and active_build.calcsTab.calcsOutput)
+      or nested_field(output, "MainHand.AverageHit")
+      or nested_field(output, "OffHand.AverageHit")
+      or nested_field(active_build.calcsTab.mainEnv and active_build.calcsTab.mainEnv.player and active_build.calcsTab.mainEnv.player.output, "MainHand.AverageHit")
+      or nested_field(active_build.calcsTab and active_build.calcsTab.calcsOutput, "MainHand.AverageHit")
+      or output_field(output, "AverageDamage")
+      or nested_field(output, "MainHand.AverageDamage"),
     CritChance = output_field(output, "CritChance"),
     CritMultiplier = output_field(output, "CritMultiplier"),
     TotalDot = output_field(output, "TotalDot") or output_field(output, "TotalDotDPS"),
@@ -317,6 +398,15 @@ local function run_calculation(opts)
     selected = nil
   end
 
+  local metadata = {
+    bridge_version = BRIDGE_VERSION,
+    xml_file = opts.xml_file,
+    calc_method = calc_method,
+  }
+  local debug_diag = add_debug_output_diagnostics(active_build)
+  if debug_diag then
+    metadata.debug_output = debug_diag
+  end
   return {
     ok = true,
     result = {
@@ -324,11 +414,7 @@ local function run_calculation(opts)
       selected_skill = selected,
       available_skills = available,
     },
-    metadata = {
-      bridge_version = BRIDGE_VERSION,
-      xml_file = opts.xml_file,
-      calc_method = calc_method,
-    },
+    metadata = metadata,
   }
 end
 

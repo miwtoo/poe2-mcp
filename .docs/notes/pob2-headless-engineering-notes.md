@@ -158,7 +158,7 @@ Success (`ok: true`):
       "CombinedDPS": 3370.88,
       "FullDPS": 0,
       "FullDotDPS": 0,
-      "AverageHit": null,
+      "AverageHit": 2208.69,
       "CritChance": 8.73,
       "CritMultiplier": 2.10,
       "TotalDot": null
@@ -259,6 +259,35 @@ This is a Windows DLL-not-found error. LuaJIT needs certain VC++ runtime DLLs in
 
 `.env` is loaded once at process start. Changes require a full restart of the MCP server process (or the AI assistant running it).
 
+### 12. `AverageHit` is nested under `output.MainHand.AverageHit` for attack skills
+
+**Issue:** `AverageHit` was always `null` in headless DPS output for attack builds (bows, melee, wands).
+
+**Root cause:** PoB2's `CalcOffence.lua` stores attack average hit inside per-weapon sub-tables of the output, not at the flat `output.AverageHit` key. For attack skills, the value lives at `output.MainHand.AverageHit` (main hand) and optionally `output.OffHand.AverageHit` (dual wield). The top-level `output.AverageHit` key does not exist for attack skills — spells use the flat key.
+
+Confirmed in PoB2 source (`CalcOffence.lua` line 4416, `CalcSections.lua` lines 248/320, spec test `build.calcsTab.mainOutput.MainHand.AverageHit`).
+
+**Fix strategy** (`headless_bridge.lua`):
+- Added `nested_field(output, path)` helper that traverses dot-separated sub-table paths (e.g., `"MainHand.AverageHit"`).
+- `AverageHit` extraction now cascades: flat `output.AverageHit` → `output.MainHand.AverageHit` → `output.OffHand.AverageHit` → across candidate tables (`mainOutput`, `mainEnv.player.output`, `calcsOutput`) → `output.AverageDamage` → `output.MainHand.AverageDamage`.
+- Only `AverageHit` uses the nested fallback. Other DPS fields (`TotalDPS`, `CombinedDPS`, etc.) continue reading from the flat output table. No broad table switch. No formula derivation.
+
+**Real build validation** (Miwtoo_ROTA Deadeye Ice Shot, poe.ninja):
+- Before: `AverageHit = null`, all other fields unchanged.
+- After: `AverageHit = 2208.69`. `TotalDPS = 3362.68`, `CombinedDPS = 3370.88`, `CritChance = 8.73%`, `CritMultiplier = 2.10` — unchanged.
+- Debug diagnostics (`POB2_HEADLESS_DEBUG_OUTPUT=1`) confirmed: `mainOutput_has_AverageHit = false`, `mainOutput_MainHand.AverageHit = 2208.69` in all three output tables. `OffHand` sub-table existed but was empty (bows are two-handed).
+
+**Diagnostics:** Set `POB2_HEADLESS_DEBUG_OUTPUT=1` in the subprocess env to get `metadata.debug_output` in the result. This reports, for each candidate output table:
+- Top-level type and keys (capped at 30)
+- Presence of `AverageHit`, `MainHand`, `OffHand`, `AverageDamage` at the top level
+- If `MainHand` is a table: `MainHand.AverageHit` value, `MainHand.AverageDamage` value, and `MainHand` keys (capped)
+
+**Guardrails:**
+- JSON contract: `result.dps.AverageHit` is unchanged. The fix is invisible to callers who never received a value.
+- No formula-derived AverageHit — only reads PoB2-computed fields.
+- `skill_selector` is a separate concern. Not affected by this change.
+- If PoB2 changes the output table structure, update `field_fallback` / `nested_field` candidate tables and paths.
+
 ## Validated Outputs
 
 ### Ice Shot / Crude Bow (minimal smoke test)
@@ -279,13 +308,14 @@ CombinedDPS=3370.88
 FullDPS=0
 FullDotDPS=0
 TotalDot=null
-AverageHit=null
+AverageHit=2208.69
 CritChance=8.73
 CritMultiplier=2.10
 selected_skill=inferred (Snipe from mainSkill)
 bridge_version=pob2-headless-mvp-3
 calc_method=BuildOutput
 PoB2 git ref=a82a33b4f
+fix=average_hit_mainhand_nested (2026-06-15)
 ```
 
 ## Commands
@@ -294,13 +324,21 @@ PoB2 git ref=a82a33b4f
 
 ```powershell
 python -m pytest tests/test_pob2_headless.py -q
-# 29 passed
+# 29 passed (headless-specific tests)
+
+# All PoB-related tests (headless + import + export):
+python -m pytest tests/test_pob2_headless.py tests/test_pob_import_robustness.py tests/test_pob_export_primary_parse.py -q
+# 36 passed
 ```
 
 ### Run all PoB-related tests
 
 ```powershell
 python -m pytest tests/test_pob2_headless.py tests/test_pob_import_robustness.py -q
+# 36 passed (headless 29 + import 7)
+
+python -m pytest tests/test_pob2_headless.py tests/test_pob_import_robustness.py tests/test_pob_export_primary_parse.py -q
+# 36 passed
 ```
 
 ### Py compile check
@@ -332,7 +370,7 @@ git -C C:\path\to\PathOfBuilding-PoE2 rev-parse HEAD
 | Issue | Description |
 |-------|-------------|
 | `selected_skill` missing in real results | Bridge derives skill from `mainEnv.player.mainSkill` but this can be nil for complex builds. Need improved extraction (e.g., from `calcsTab.calcsOutput`). |
-| `AverageHit` always null | Extraction may need alternate output key or different PoB2 API. |
+| ~~`AverageHit` always null~~ | **Resolved (2026-06-15).** Root cause: attack skills store AverageHit under `output.MainHand.AverageHit`, not flat. Fix: `nested_field` fallback in `headless_bridge.lua`. See Critical Debug Learning #12. |
 | `skill_selector` unsupported | Cannot choose between Snipe vs Ice Shot. Future: implement exact socket group / skill selection. |
 | No golden fixtures | No sample builds with known GUI outputs to validate against. Future: export builds from PoB2 GUI and commit as test fixtures. |
 | PoB2 private API drift | `HeadlessWrapper.lua` internals may change. Pin PoB2 commit or add diagnostic checks. |
