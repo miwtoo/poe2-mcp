@@ -31,6 +31,9 @@ lib64/
 *.egg-info/
 poe2_mcp.egg-info/
 
+# Downloadable/local runtime artifacts
+runtime/
+
 # MCP Bundle artifacts
 *.mcpb
 mcpb_bundle/server/
